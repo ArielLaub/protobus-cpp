@@ -33,3 +33,15 @@ if(integration_sources)
   protobus_warnings(protobus_integration_tests)
   gtest_discover_tests(protobus_integration_tests DISCOVERY_MODE PRE_TEST DISCOVERY_TIMEOUT 60 PROPERTIES LABELS integration)
 endif()
+
+# The documentation's C++ snippets compile against the current API.
+find_package(Python3 COMPONENTS Interpreter)
+if(Python3_FOUND)
+  add_test(NAME doc-snippets
+    COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/scripts/check-doc-snippets.py
+      --cli $<TARGET_FILE:protobus-cpp> --protoc $<TARGET_FILE:protobuf::protoc> --cxx ${CMAKE_CXX_COMPILER}
+      --include ${PROTOBUS_GENERATED_DIR}
+      "--include=$<JOIN:$<TARGET_PROPERTY:protobuf::libprotobuf,INTERFACE_INCLUDE_DIRECTORIES>,;--include=>"
+    COMMAND_EXPAND_LISTS)
+  set_tests_properties(doc-snippets PROPERTIES LABELS unit)
+endif()
