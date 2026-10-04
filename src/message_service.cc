@@ -224,6 +224,17 @@ void MessageService::init() {
     initialized_ = true;
   } catch (const std::exception& e) {
     Logger::error("error initializing service " + ServiceName() + " - " + e.what());
+    // Nothing of a service that failed to start keeps running.
+    try {
+      stopConsuming();
+    } catch (...) {
+    }
+    for (BaseListener* l : {static_cast<BaseListener*>(listener_.get()), static_cast<BaseListener*>(eventListener_.get())}) {
+      try {
+        if (l->isInitialized()) l->close();
+      } catch (...) {
+      }
+    }
     throw;
   }
 }

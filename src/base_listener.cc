@@ -3,6 +3,7 @@
 #include <algorithm>
 
 #include "executor.h"
+#include "scheduler.h"
 #include "protobus/config.h"
 #include "protobus/errors.h"
 #include "protobus/logger.h"
@@ -145,18 +146,49 @@ void BaseListener::watchChannel(const std::shared_ptr<amqp::Channel>& ch) {
       if (self->closing_ || !self->initialized_ || !current || self->channel_ != current) return;
     }
     if (!self->connection_->isReady()) return;  // the reconnection restores it
-    Logger::warn(std::string(self->listenerName()) + ": channel closed on a live connection (" + reason +
-                 "); rebuilding it");
-    self->connection_->executor().post([weak] {
-      auto s = weak.lock();
-      if (!s || !s->connection_->isReady()) return;
-      try {
-        s->restore();
-      } catch (const std::exception& e) {
-        Logger::error(std::string(s->listenerName()) + ": failed to rebuild its channel: " + e.what());
-      }
+    self->scheduleRebuild(reason);
+  });
+}
+
+// One rebuild pending at a time, backing off while they keep failing, so a
+// channel error that recurs on every attempt (a queue redeclared with other
+// arguments, a permission refused) cannot spin against the broker.
+void BaseListener::scheduleRebuild(const std::string& reason) {
+  int failures;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (rebuildScheduled_ || closing_ || !initialized_) return;
+    rebuildScheduled_ = true;
+    failures = rebuildFailures_;
+  }
+  const int64_t delay = std::min<int64_t>(int64_t{100} << std::min(failures, 9), 30000);
+  Logger::warn(std::string(listenerName()) + ": channel closed on a live connection (" + reason +
+               "); rebuilding it in " + std::to_string(delay) + "ms");
+  std::weak_ptr<BaseListener> weak = weak_from_this();
+  auto connection = connection_;
+  connection_->scheduler().schedule(std::chrono::milliseconds(delay), [weak, connection] {
+    connection->executor().post([weak] {
+      if (auto s = weak.lock()) s->rebuild();
     });
   });
+}
+
+void BaseListener::rebuild() {
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    rebuildScheduled_ = false;
+    if (closing_ || !initialized_) return;
+    ++rebuildFailures_;
+  }
+  if (!connection_->isReady()) return;
+  try {
+    restore();
+    std::lock_guard<std::mutex> lock(mutex_);
+    rebuildFailures_ = 0;
+  } catch (const std::exception& e) {
+    Logger::error(std::string(listenerName()) + ": failed to rebuild its channel: " + e.what());
+    scheduleRebuild(e.what());
+  }
 }
 
 void BaseListener::startConsuming() {

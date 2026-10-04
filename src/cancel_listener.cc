@@ -1,5 +1,6 @@
 #include "protobus/cancel_listener.h"
 
+#include "executor.h"
 #include "protobus/config.h"
 #include "protobus/logger.h"
 #include "uuid.h"
@@ -52,8 +53,13 @@ void CancelListener::startInner() {
         const std::string correlationId = msg.properties.correlationId.value_or("");
         if (correlationId.empty()) return;
         // Every replica hears every cancel; only the one running that stream
-        // has anything to do.
-        if (auto c = weakConnection.lock()) c->cancelStream(correlationId);
+        // has anything to do. Off the transport's thread: cancelling runs the
+        // handler's abort listeners, which are user code and may block.
+        if (auto c = weakConnection.lock()) {
+          c->executor().post([weakConnection, correlationId] {
+            if (auto conn = weakConnection.lock()) conn->cancelStream(correlationId);
+          });
+        }
       },
       nullptr);
   std::lock_guard<std::mutex> lock(mutex_);

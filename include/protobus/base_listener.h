@@ -93,6 +93,8 @@ class BaseListener : public std::enable_shared_from_this<BaseListener> {
   void startConsuming();
   void onDisconnected();
   void watchChannel(const std::shared_ptr<amqp::Channel>& channel);
+  void scheduleRebuild(const std::string& reason);
+  void rebuild();
 
   mutable std::mutex mutex_;
   std::shared_ptr<amqp::Channel> channel_;
@@ -104,6 +106,8 @@ class BaseListener : public std::enable_shared_from_this<BaseListener> {
   bool initialized_ = false;
   bool wasStarted_ = false;
   bool closing_ = false;
+  bool rebuildScheduled_ = false;
+  int rebuildFailures_ = 0;
   std::vector<std::string> bindings_;
   std::function<void()> detachRestorer_;
   std::optional<Connection::ListenerId> disconnectedListener_;

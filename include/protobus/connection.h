@@ -228,7 +228,8 @@ class Connection : public std::enable_shared_from_this<Connection> {
   std::string publishToQueue(const std::shared_ptr<amqp::Channel>& channel, const std::string& queueName,
                              const std::string& content, PublishOptions options);
   // publish() without waiting: `done` receives null or the failure, on
-  // whichever thread settles it. Safe to call from a transport callback.
+  // whichever thread settles it, often the transport's: it must not block.
+  // Safe to call from a transport callback.
   void publishAsync(const std::shared_ptr<amqp::Channel>& channel, const std::string& exchange,
                     const std::string& routingKey, const std::string& content, PublishOptions options,
                     std::function<void(std::exception_ptr)> done);

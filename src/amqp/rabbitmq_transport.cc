@@ -339,7 +339,9 @@ struct Consumer {
 // Everything about a channel the I/O thread owns.
 struct ChannelState {
   amqp_channel_t id = 0;
-  bool closed = false;
+  // Written on the I/O thread, read anywhere; closeReason is set under
+  // callbackMutex before `closed` is published.
+  std::atomic<bool> closed{false};
   std::string closeReason;
   uint64_t nextSeq = 1;
   std::map<uint64_t, PendingConfirm> pending;
@@ -349,6 +351,9 @@ struct ChannelState {
   std::unordered_multiset<std::string> awaiting;
   std::unordered_set<std::string> returned;
   std::map<std::string, Consumer> consumers;
+  // No-ack consumers cancelled on this channel: a delivery for one still in
+  // flight is dropped, never rejected (an unknown tag closes the channel).
+  std::set<std::string> cancelledNoAck;
 
   // Content assembly for a delivery or return in progress.
   enum class Assembly { None, Deliver, Return } assembly = Assembly::None;
@@ -411,6 +416,7 @@ class RabbitConnection : public Connection, public std::enable_shared_from_this<
       stopRequested_ = true;
     }
     wake();
+    std::lock_guard<std::mutex> lock(joinMutex_);
     if (io_.joinable()) {
       if (io_.get_id() == std::this_thread::get_id()) {
         io_.detach();
@@ -459,6 +465,7 @@ class RabbitConnection : public Connection, public std::enable_shared_from_this<
     } catch (const AmqpError&) {
       // Already closed.
     }
+    std::lock_guard<std::mutex> lock(joinMutex_);
     if (io_.joinable() && io_.get_id() != std::this_thread::get_id()) io_.join();
   }
 
@@ -562,10 +569,27 @@ class RabbitConnection : public Connection, public std::enable_shared_from_this<
   void closeChannel(amqp_channel_t id, const std::string& reason) {
     auto st = channel(id);
     if (!st || st->closed) return;
-    st->closed = true;
-    st->closeReason = reason;
+    markClosed(*st, reason);
     channels_.erase(id);
     failChannel(*st, reason);
+  }
+
+  static void markClosed(ChannelState& st, const std::string& reason) {
+    std::lock_guard<std::mutex> lock(st.callbackMutex);
+    st.closeReason = reason;
+    st.closed = true;
+  }
+
+  // Handle every frame rabbitmq-c queued while it waited for an RPC reply.
+  // Run before a close is acted on: the broker sends a channel's confirms
+  // before its close-ok, and they would otherwise be lost.
+  void drainQueuedFrames() {
+    while (!lost_ && amqp_frames_enqueued(conn_)) {
+      amqp_frame_t frame;
+      timeval zero{0, 0};
+      if (amqp_simple_wait_frame_noblock(conn_, &frame, &zero) != AMQP_STATUS_OK) return;
+      handleFrame(frame);
+    }
   }
 
   void failChannel(ChannelState& st, const std::string& reason) {
@@ -659,6 +683,7 @@ class RabbitConnection : public Connection, public std::enable_shared_from_this<
     if (!lost_) {
       amqp_rpc_reply_t r = amqp_connection_close(conn_, AMQP_REPLY_SUCCESS);
       (void)r;
+      drainQueuedFrames();
     }
   }
 
@@ -808,8 +833,9 @@ class RabbitConnection : public Connection, public std::enable_shared_from_this<
     auto it = st.consumers.find(d.consumerTag);
     if (it == st.consumers.end()) {
       // The consumer was cancelled with this delivery in flight. Hand it
-      // back to the broker rather than leaving it unacknowledged.
-      amqp_basic_reject(conn_, st.id, d.deliveryTag, 1);
+      // back to the broker rather than leaving it unacknowledged, unless it
+      // was never to be acknowledged at all.
+      if (!st.cancelledNoAck.count(d.consumerTag)) amqp_basic_reject(conn_, st.id, d.deliveryTag, 1);
       return;
     }
     try {
@@ -852,8 +878,7 @@ class RabbitConnection : public Connection, public std::enable_shared_from_this<
     auto channels = std::move(channels_);
     channels_.clear();
     for (auto& [_, st] : channels) {
-      st->closed = true;
-      st->closeReason = channelReason;
+      markClosed(*st, channelReason);
       failChannel(*st, channelReason);
     }
     std::deque<std::function<void()>> leftover;
@@ -880,6 +905,7 @@ class RabbitConnection : public Connection, public std::enable_shared_from_this<
   int channelMax_;
   int wake_[2] = {-1, -1};
   std::thread io_;
+  std::mutex joinMutex_;
   std::atomic<std::thread::id> ioThreadId_{};
   std::atomic<bool> open_{false};
 
@@ -1000,6 +1026,8 @@ std::string RabbitChannel::consume(const std::string& queue, const std::string& 
 void RabbitChannel::cancel(const std::string& consumerTag) {
   conn_->run([&] {
     if (state_->closed) throw AmqpError("channel is closed: " + state_->closeReason, 0, true);
+    auto it = state_->consumers.find(consumerTag);
+    if (it != state_->consumers.end() && it->second.noAck) state_->cancelledNoAck.insert(consumerTag);
     amqp_basic_cancel(conn_->state(), state_->id, stringBytes(consumerTag));
     conn_->check(amqp_get_rpc_reply(conn_->state()), state_->id, "basic.cancel");
     state_->consumers.erase(consumerTag);
@@ -1053,7 +1081,13 @@ void RabbitChannel::close() {
     conn_->run([this] {
       if (state_->closed) return 0;
       amqp_rpc_reply_t r = amqp_channel_close(conn_->state(), state_->id, AMQP_REPLY_SUCCESS);
-      (void)r;
+      // Confirms the broker sent before its close-ok settle as what they are.
+      conn_->drainQueuedFrames();
+      try {
+        // A close crossing ours from the broker still needs its close-ok.
+        conn_->check(r, state_->id, "channel.close");
+      } catch (const AmqpError&) {
+      }
       conn_->closeChannel(state_->id, "channel closed");
       return 0;
     });

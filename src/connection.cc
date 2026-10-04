@@ -44,6 +44,33 @@ void carryProperties(const amqp::Properties& from, amqp::Properties& to) {
   if (from.appId) to.appId = from.appId;
 }
 
+// Runs `fn`, or queues it behind the call already running on this thread.
+// Releasing a confirm slot starts the next parked publish, whose failure
+// releases its slot and starts the next: run directly, a channel closing on
+// thousands of parked publishes would recurse once per publish.
+thread_local std::deque<std::function<void()>>* trampoline = nullptr;
+
+void runTrampolined(std::function<void()> fn) {
+  if (trampoline != nullptr) {
+    trampoline->push_back(std::move(fn));
+    return;
+  }
+  std::deque<std::function<void()>> queue;
+  queue.push_back(std::move(fn));
+  trampoline = &queue;
+  while (!queue.empty()) {
+    auto next = std::move(queue.front());
+    queue.pop_front();
+    try {
+      next();
+    } catch (...) {
+      trampoline = nullptr;
+      throw;
+    }
+  }
+  trampoline = nullptr;
+}
+
 double jitterFraction() {
   thread_local std::mt19937 gen{std::random_device{}()};
   return std::uniform_real_distribution<double>(0.0, 0.3)(gen);
@@ -591,7 +618,7 @@ std::shared_ptr<Connection::PublishState> Connection::publishStateFor(const std:
       parked.swap(st->waiters);
       st->inFlight += static_cast<int64_t>(parked.size());
     }
-    for (auto& start : parked) start();
+    for (auto& start : parked) runTrampolined(std::move(start));
     if (auto self = weak.lock()) {
       std::lock_guard<std::mutex> lock(self->publishMutex_);
       auto found = self->publishStates_.find(key);
@@ -637,7 +664,7 @@ void Connection::confirmedPublish(const std::shared_ptr<amqp::Channel>& channel,
         ++state->inFlight;
       }
     }
-    if (next) next();
+    if (next) runTrampolined(std::move(next));
   };
 
   auto finish = [op, scheduler, release, done](std::exception_ptr err) {
@@ -647,11 +674,16 @@ void Connection::confirmedPublish(const std::shared_ptr<amqp::Channel>& channel,
     done(err);
   };
 
+  auto executor = executor_;
   auto start = [=]() {
+    // The timer thread must not block: finishing frees a slot, which can
+    // start a parked publish, which waits on the transport.
     op->timer = scheduler->schedule(std::chrono::milliseconds(confirmTimeout), [finish, describe, confirmTimeout,
-                                                                                 messageId] {
-      finish(std::make_exception_ptr(PublishConfirmTimeoutError(
-          "no broker confirm for " + describe + " within " + std::to_string(confirmTimeout) + "ms", messageId)));
+                                                                                 messageId, executor] {
+      executor->post([finish, describe, confirmTimeout, messageId] {
+        finish(std::make_exception_ptr(PublishConfirmTimeoutError(
+            "no broker confirm for " + describe + " within " + std::to_string(confirmTimeout) + "ms", messageId)));
+      });
     });
     try {
       channel->publish(exchange, routingKey, content, options.properties, options.mandatory,
@@ -693,7 +725,7 @@ void Connection::confirmedPublish(const std::shared_ptr<amqp::Channel>& channel,
       state->waiters.push_back(start);
     }
   }
-  if (now) start();
+  if (now) runTrampolined(start);
 }
 
 void Connection::publishAsync(const std::shared_ptr<amqp::Channel>& channel, const std::string& exchange,
@@ -887,8 +919,10 @@ void Connection::handleDelivery(std::shared_ptr<Delivery> d) {
   // first settles the delivery, and the other is discarded.
   auto self = shared_from_this();
   d->timer = scheduler_->schedule(std::chrono::milliseconds(limit), [self, d, limit] {
-    d->entry->controller.abort();
+    // Only a timer that wins the race aborts: a handler that returned first
+    // (a stream about to be published, say) must keep its signal.
     if (d->settled.exchange(true)) return;
+    d->entry->controller.abort();
     self->executor_->post([self, d, limit] {
       self->settleError(d, std::make_exception_ptr(TimeoutError(
                                "message " + d->correlationId + " exceeded the " + std::to_string(limit) +

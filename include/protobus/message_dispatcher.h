@@ -51,6 +51,7 @@ class MessageDispatcher : public std::enable_shared_from_this<MessageDispatcher>
 
   void onResult(const std::string& content, const std::string& id, const amqp::FieldTable* headers);
   void onDisconnected();
+  void publishCancel(const std::string& id);
   void restore();
   void awaitPublishable();
   void declareCoreExchanges();

@@ -4,6 +4,7 @@
 #include <cctype>
 #include <deque>
 
+#include "executor.h"
 #include "protobus/config.h"
 #include "protobus/errors.h"
 #include "protobus/logger.h"
@@ -304,29 +305,14 @@ void MessageDispatcher::init() {
   });
   {
     std::lock_guard<std::mutex> lock(streams_->mutex);
+    // Called from timers and from abort listeners: published from a worker,
+    // where waiting on the transport is allowed.
     streams_->publishCancel = [weak](const std::string& id) {
       auto self = weak.lock();
       if (!self) return;
-      std::shared_ptr<amqp::Channel> ch;
-      try {
-        ch = self->publishChannel();
-      } catch (...) {
-      }
-      if (!ch) return;
-      PublishOptions p;
-      p.properties.correlationId = id;
-      p.properties.contentType = "application/octet-stream";
-      // Fire-and-forget: the caller has already stopped waiting.
-      self->connection_->publishAsync(ch, Config::cancelExchangeName(), "", std::string(), std::move(p),
-                                      [id](std::exception_ptr err) {
-                                        if (!err) return;
-                                        try {
-                                          std::rethrow_exception(err);
-                                        } catch (const std::exception& e) {
-                                          Logger::debug("failed to publish cancel for stream " + id + ": " +
-                                                        e.what());
-                                        }
-                                      });
+      self->connection_->executor().post([weak, id] {
+        if (auto s = weak.lock()) s->publishCancel(id);
+      });
     };
   }
 
@@ -383,6 +369,29 @@ std::shared_ptr<amqp::Channel> MessageDispatcher::publishChannel() {
   return channel_;
 }
 
+// Fire-and-forget: the caller has already stopped waiting, and a lost notice
+// only means the producer runs to completion.
+void MessageDispatcher::publishCancel(const std::string& id) {
+  std::shared_ptr<amqp::Channel> ch;
+  try {
+    ch = publishChannel();
+  } catch (...) {
+  }
+  if (!ch) return;
+  PublishOptions p;
+  p.properties.correlationId = id;
+  p.properties.contentType = "application/octet-stream";
+  connection_->publishAsync(ch, Config::cancelExchangeName(), "", std::string(), std::move(p),
+                            [id](std::exception_ptr err) {
+                              if (!err) return;
+                              try {
+                                std::rethrow_exception(err);
+                              } catch (const std::exception& e) {
+                                Logger::debug("failed to publish cancel for stream " + id + ": " + e.what());
+                              }
+                            });
+}
+
 void MessageDispatcher::onDisconnected() {
   Logger::debug("MessageDispatcher: connection lost, rejecting pending callbacks");
   std::map<std::string, std::shared_ptr<PendingCall>> calls;
@@ -402,6 +411,10 @@ void MessageDispatcher::onDisconnected() {
     stream->error = error;
     stream->ended = true;
     streams_->clearIdle(*stream);
+    // Its bytes leave the process-wide total with it, so a later release
+    // cannot subtract them from a total that no longer holds them.
+    stream->chunks.clear();
+    stream->bufferedBytes = 0;
     stream->cv.notify_all();
   }
   streams_->pending.clear();

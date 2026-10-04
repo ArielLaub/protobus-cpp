@@ -282,3 +282,78 @@ TEST_F(ConnectionTest, ARedeliveredMessageSaysSo) {
 }
 
 }  // namespace
+
+namespace {
+
+class CountingLogger : public protobus::ILogger {
+ public:
+  void info(const std::string&) override {}
+  void debug(const std::string&) override {}
+  void warn(const std::string& m) override { count(m); }
+  void error(const std::string& m) override { count(m); }
+  std::atomic<int> rebuilds{0};
+
+ private:
+  void count(const std::string& m) {
+    if (m.find("rebuild") != std::string::npos) ++rebuilds;
+  }
+};
+
+TEST_F(ConnectionTest, AChannelThatKeepsFailingIsNotRebuiltInATightLoop) {
+  serve();
+  auto logger = std::make_shared<CountingLogger>();
+  protobus::setLogger(logger);
+  protobus::setLogLevel(protobus::LogLevel::Warn);
+  {
+    auto other = newContext();
+    protobus::MessageServiceOptions o;
+    o.retry.retryDelayMs = 1234;  // its retry queue redeclaration fails with a 406
+    auto second = std::make_shared<pbtesting::CalcService>(*other, o);
+    EXPECT_THROW(second->init(), protobus::RetryQueueMismatchError);
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+  }
+  protobus::setLogLevel(protobus::LogLevel::Silent);
+  protobus::setLogger(nullptr);
+  EXPECT_LE(logger->rebuilds.load(), 5);
+}
+
+TEST_F(ConnectionTest, ManyPublishesParkedOnTheBoundUnwindWhenTheConnectionDrops) {
+  env.set("PUBLISH_CONFIRM_TIMEOUT_MS", "60000");
+  auto ch = channelWithQueue("q1");
+  broker->setConfirmMode(MemoryBroker::ConfirmMode::Drop);
+  constexpr int kPublishes = 20000;
+  std::atomic<int> done{0};
+  for (int i = 0; i < kPublishes; ++i) {
+    ctx->connection().publishAsync(ch, "test.x", "q1", "x", {}, [&](std::exception_ptr) { ++done; });
+  }
+  broker->killConnections();
+  ASSERT_TRUE(eventually([&] { return done.load() == kPublishes; }, std::chrono::seconds(20)));
+}
+
+}  // namespace
+
+namespace {
+
+TEST_F(ConnectionTest, ARebuildThatKeepsFailingBacksOff) {
+  serve();
+  // An operator redeclares the retry queue with other arguments: every
+  // rebuild of the service's channel now ends in a 406.
+  auto ch = ctx->connection().openChannel();
+  ctx->connection().deleteQueue(ch, "pbtest.Calc.Retry");
+  protobus::QueueOptions q;
+  q.arguments["x-message-ttl"] = protobus::amqp::FieldValue::fromInt(42);
+  ctx->connection().declareQueue(ch, "pbtest.Calc.Retry", q);
+
+  auto logger = std::make_shared<CountingLogger>();
+  protobus::setLogger(logger);
+  protobus::setLogLevel(protobus::LogLevel::Warn);
+  broker->closeChannelsConsuming("pbtest.Calc");
+  std::this_thread::sleep_for(std::chrono::milliseconds(500));
+  protobus::setLogLevel(protobus::LogLevel::Silent);
+  protobus::setLogger(nullptr);
+  // 100, 200, 400 ms apart: a handful of attempts, not thousands.
+  EXPECT_LE(logger->rebuilds.load(), 8);
+  EXPECT_GE(logger->rebuilds.load(), 2);
+}
+
+}  // namespace
