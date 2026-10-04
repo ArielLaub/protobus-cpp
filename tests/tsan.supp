@@ -1,0 +1,4 @@
+# exception_ptr reference counts live in libc++abi, which is not instrumented:
+# TSan sees the exception object's destruction on one thread and the reads of
+# it on another without the atomic decrement that orders them.
+race:__cxa_decrement_exception_refcount

@@ -254,8 +254,8 @@ TEST_F(ServiceTest, ChangedRetryDelayIsReportedAsAMismatch) {
   auto other = newContext();
   protobus::MessageServiceOptions o;
   o.retry.retryDelayMs = 1234;
-  CalcService second(*other, o);
-  EXPECT_THROW(second.init(), protobus::RetryQueueMismatchError);
+  auto second = std::make_shared<CalcService>(*other, o);
+  EXPECT_THROW(second->init(), protobus::RetryQueueMismatchError);
 }
 
 TEST_F(ServiceTest, CustomTypesRoundTrip) {
@@ -384,6 +384,11 @@ TEST_F(ServiceTest, DynamicServiceAnswersATypedProxy) {
     EXPECT_EQ(e.code(), "PROTOCOL_ERROR");
     EXPECT_STREQ(e.what(), "invalid service method whoami");
   }
+}
+
+TEST_F(ServiceTest, AServiceMustBeSharedOwned) {
+  CalcService onTheStack(*ctx);
+  EXPECT_THROW(onTheStack.init(), std::logic_error);
 }
 
 TEST_F(ServiceTest, AServiceWithoutASchemaFailsToStart) {

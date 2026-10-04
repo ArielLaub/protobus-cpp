@@ -257,13 +257,18 @@ const char* toString(CustomWireType t) {
 
 namespace {
 
-std::mutex registryMutex;
+// Process-wide and never destroyed, like the other registries a worker
+// thread can reach during exit.
+std::mutex& registryMutex() {
+  static auto* m = new std::mutex;
+  return *m;
+}
 std::map<std::string, CustomType>& registry() {
-  static std::map<std::string, CustomType> r = {
+  static auto* r = new std::map<std::string, CustomType>{
       {"bigint", CustomType{"bigint", CustomWireType::Bytes}},
       {"timestamp", CustomType{"timestamp", CustomWireType::Int64}},
   };
-  return r;
+  return *r;
 }
 
 bool validName(const std::string& name) {
@@ -280,7 +285,7 @@ void registerCustomType(const CustomType& type) {
     throw CustomTypeConflictError("custom type name '" + type.name +
                                   "' is not a valid root-level protobuf identifier");
   }
-  std::lock_guard<std::mutex> lock(registryMutex);
+  std::lock_guard<std::mutex> lock(registryMutex());
   auto it = registry().find(type.name);
   if (it != registry().end()) {
     if (it->second.wireType != type.wireType) {
@@ -296,12 +301,12 @@ void registerCustomType(const CustomType& type) {
 }
 
 bool isCustomType(const std::string& name) {
-  std::lock_guard<std::mutex> lock(registryMutex);
+  std::lock_guard<std::mutex> lock(registryMutex());
   return registry().count(name) > 0;
 }
 
 std::vector<CustomType> getCustomTypes() {
-  std::lock_guard<std::mutex> lock(registryMutex);
+  std::lock_guard<std::mutex> lock(registryMutex());
   std::vector<CustomType> out;
   for (const auto& [_, t] : registry()) out.push_back(t);
   return out;
@@ -327,10 +332,13 @@ using google::protobuf::Reflection;
 
 bool isBigint(const Descriptor* d) { return d->full_name() == "bigint"; }
 
-std::mutex reachMutex;
+std::mutex& reachMutex() {
+  static auto* m = new std::mutex;
+  return *m;
+}
 std::unordered_map<const Descriptor*, bool>& reachCache() {
-  static std::unordered_map<const Descriptor*, bool> c;
-  return c;
+  static auto* c = new std::unordered_map<const Descriptor*, bool>;
+  return *c;
 }
 
 bool reachesBigintWalk(const Descriptor* d, std::unordered_set<const Descriptor*>& visiting) {
@@ -346,13 +354,13 @@ bool reachesBigintWalk(const Descriptor* d, std::unordered_set<const Descriptor*
 
 bool reachesBigint(const Descriptor* d) {
   {
-    std::lock_guard<std::mutex> lock(reachMutex);
+    std::lock_guard<std::mutex> lock(reachMutex());
     auto it = reachCache().find(d);
     if (it != reachCache().end()) return it->second;
   }
   std::unordered_set<const Descriptor*> visiting;
   const bool found = reachesBigintWalk(d, visiting);
-  std::lock_guard<std::mutex> lock(reachMutex);
+  std::lock_guard<std::mutex> lock(reachMutex());
   reachCache()[d] = found;
   return found;
 }

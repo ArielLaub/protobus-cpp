@@ -32,10 +32,14 @@ struct CacheEntry {
 
 // These getters sit on per-message paths, so a parse is memoised against the
 // raw string and redone only when the variable actually changes.
-std::mutex cacheMutex;
+// Never destroyed: worker threads may read configuration during exit.
+std::mutex& cacheMutex() {
+  static auto* m = new std::mutex;
+  return *m;
+}
 std::unordered_map<std::string, CacheEntry>& cache() {
-  static std::unordered_map<std::string, CacheEntry> c;
-  return c;
+  static auto* c = new std::unordered_map<std::string, CacheEntry>;
+  return *c;
 }
 
 }  // namespace
@@ -43,7 +47,7 @@ std::unordered_map<std::string, CacheEntry>& cache() {
 int64_t envInt(const char* name, int64_t fallback) {
   auto raw = rawEnv(name);
   {
-    std::lock_guard<std::mutex> lock(cacheMutex);
+    std::lock_guard<std::mutex> lock(cacheMutex());
     auto it = cache().find(name);
     if (it != cache().end() && it->second.raw == raw) {
       return it->second.value;
@@ -62,7 +66,7 @@ int64_t envInt(const char* name, int64_t fallback) {
       if (parsed > 0) value = parsed;
     }
   }
-  std::lock_guard<std::mutex> lock(cacheMutex);
+  std::lock_guard<std::mutex> lock(cacheMutex());
   cache()[name] = CacheEntry{raw, value};
   return value;
 }

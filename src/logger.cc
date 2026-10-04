@@ -31,27 +31,38 @@ LogLevel levelFromEnv() {
 
 std::atomic<int> currentLevel{static_cast<int>(levelFromEnv())};
 
-std::mutex sinkMutex;
+// Process-wide state is never destroyed: worker threads may still log while
+// static destructors run at exit.
+std::mutex& sinkMutex() {
+  static auto* m = new std::mutex;
+  return *m;
+}
 std::shared_ptr<ILogger>& sinkSlot() {
-  static std::shared_ptr<ILogger> sink = std::make_shared<DefaultLogger>();
-  return sink;
+  static auto* sink = new std::shared_ptr<ILogger>(std::make_shared<DefaultLogger>());
+  return *sink;
 }
 
 std::shared_ptr<ILogger> currentSink() {
-  std::lock_guard<std::mutex> lock(sinkMutex);
+  std::lock_guard<std::mutex> lock(sinkMutex());
   return sinkSlot();
 }
 
-std::mutex serializerMutex;
+std::mutex& serializerMutex() {
+  static auto* m = new std::mutex;
+  return *m;
+}
 DiagnosticsSerializer& serializerSlot() {
-  static DiagnosticsSerializer s;
-  return s;
+  static auto* s = new DiagnosticsSerializer;
+  return *s;
 }
 
-std::mutex outputMutex;
+std::mutex& outputMutex() {
+  static auto* m = new std::mutex;
+  return *m;
+}
 
 void writeLine(std::ostream& out, const std::string& message) {
-  std::lock_guard<std::mutex> lock(outputMutex);
+  std::lock_guard<std::mutex> lock(outputMutex());
   out << message << '\n';
   out.flush();
 }
@@ -64,7 +75,7 @@ void DefaultLogger::debug(const std::string& message) { writeLine(std::cout, mes
 void DefaultLogger::error(const std::string& message) { writeLine(std::cerr, message); }
 
 void setLogger(std::shared_ptr<ILogger> logger) {
-  std::lock_guard<std::mutex> lock(sinkMutex);
+  std::lock_guard<std::mutex> lock(sinkMutex());
   sinkSlot() = logger ? std::move(logger) : std::make_shared<DefaultLogger>();
 }
 
@@ -116,7 +127,7 @@ const char* toString(LogOutcome outcome) {
 }
 
 void setDiagnosticsSerializer(DiagnosticsSerializer serializer) {
-  std::lock_guard<std::mutex> lock(serializerMutex);
+  std::lock_guard<std::mutex> lock(serializerMutex());
   serializerSlot() = std::move(serializer);
 }
 
@@ -209,7 +220,7 @@ void emit(const char* level, LogLevel threshold, const std::string& message, con
 
   DiagnosticsSerializer serializer;
   {
-    std::lock_guard<std::mutex> lock(serializerMutex);
+    std::lock_guard<std::mutex> lock(serializerMutex());
     serializer = serializerSlot();
   }
   if (serializer && fields.diagnostics) {

@@ -19,44 +19,15 @@ std::string lastSegment(const std::string& value) {
 
 }  // namespace
 
-// Keeps a destroyed service from being called: every delivery, and every
-// stream generator, holds a ticket while it runs, and the destructor waits
-// for the tickets to come back.
-struct MessageService::Guard {
-  std::mutex mutex;
-  std::condition_variable cv;
-  MessageService* self = nullptr;
-  int active = 0;
-
-  struct Ticket {
-    std::shared_ptr<Guard> guard;
-    ~Ticket() {
-      {
-        std::lock_guard<std::mutex> lock(guard->mutex);
-        --guard->active;
-      }
-      guard->cv.notify_all();
-    }
-  };
-
-  static std::shared_ptr<Ticket> enter(const std::shared_ptr<Guard>& g, MessageService** out) {
-    std::lock_guard<std::mutex> lock(g->mutex);
-    if (g->self == nullptr) return nullptr;
-    ++g->active;
-    *out = g->self;
-    return std::shared_ptr<Ticket>(new Ticket{g});
-  }
-};
-
 namespace {
 
 // Wraps each chunk of a stream in a ResponseContainer. A failure during
 // iteration becomes the stream's terminal error response, which the
 // connection layer publishes with x-protobus-final=true so the caller's
-// iteration raises it. The ticket keeps the service alive while the stream
+// iteration raises it. `service` keeps the service alive while the stream
 // runs.
 Generator<std::string> streamResponses(std::string method, Generator<std::string> inner, std::string correlationId,
-                                       std::shared_ptr<void> ticket) {
+                                       std::shared_ptr<void> service) {
   std::optional<std::string> failure;
   try {
     while (auto chunk = inner.next()) co_yield MessageFactory::buildResultResponse(method, *chunk);
@@ -76,8 +47,7 @@ Generator<std::string> streamResponses(std::string method, Generator<std::string
 }  // namespace
 
 MessageService::MessageService(Context& context, MessageServiceOptions options)
-    : context_(context), options_(std::move(options)), guard_(std::make_shared<Guard>()) {
-  guard_->self = this;
+    : context_(context), options_(std::move(options)) {
   listener_ = std::make_shared<MessageListener>(context_.connectionPtr(), options_.lateAck.value_or(true),
                                                 options_.maxConcurrent, options_.retry,
                                                 options_.processingTimeoutMs, options_.maxPriority);
@@ -91,9 +61,6 @@ MessageService::~MessageService() {
     close();
   } catch (...) {
   }
-  std::unique_lock<std::mutex> lock(guard_->mutex);
-  guard_->self = nullptr;
-  guard_->cv.wait(lock, [&] { return guard_->active == 0; });
 }
 
 std::string MessageService::ProtoFileName() const { return ""; }
@@ -224,25 +191,26 @@ void MessageService::init() {
   try {
     registerSchema();
     resolveContract();
-    std::weak_ptr<Guard> weakGuard = guard_;
+    // Every delivery holds the service for as long as its handler runs.
+    std::weak_ptr<MessageService> weak = weak_from_this();
+    if (weak.expired()) {
+      throw std::logic_error("service " + ServiceName() +
+                             " must be owned by a std::shared_ptr: construct it with std::make_shared (or "
+                             "RunnableService::start) before calling init()");
+    }
     listener_->setErrorReplyBuilder(
-        [weakGuard](const std::string& content, const std::exception& error) -> std::optional<std::string> {
-          auto g = weakGuard.lock();
-          if (!g) return std::nullopt;
-          MessageService* self = nullptr;
-          auto ticket = Guard::enter(g, &self);
-          if (!ticket) return std::nullopt;
+        [weak](const std::string& content, const std::exception& error) -> std::optional<std::string> {
+          auto self = weak.lock();
+          if (!self) return std::nullopt;
           return self->buildTimeoutReply(content, error);
         });
     listener_->init(
-        [weakGuard](const std::string& data, const std::string& correlationId,
-                    MessageHandlerContext& context) -> MessageHandlerResult {
-          auto g = weakGuard.lock();
-          MessageService* self = nullptr;
-          auto ticket = g ? Guard::enter(g, &self) : nullptr;
-          if (!ticket) throw NotInitializedError("the service has been destroyed");
-          // A stream runs after this returns, so onMessage gives it a ticket
-          // of its own.
+        [weak](const std::string& data, const std::string& correlationId,
+               MessageHandlerContext& context) -> MessageHandlerResult {
+          auto self = weak.lock();
+          if (!self) throw NotInitializedError("the service has been destroyed");
+          // A stream runs after this returns, so onMessage hands it a
+          // reference of its own.
           return self->onMessage(data, correlationId, context);
         },
         ServiceName());
@@ -441,9 +409,7 @@ MessageHandlerResult MessageService::onMessage(const std::string& data, const st
       // HandledError) is answered as the unary path answers one.
       return handleUnaryError(envelope.method, std::current_exception(), correlationId);
     }
-    MessageService* self = nullptr;
-    auto ticket = Guard::enter(guard_, &self);
-    return streamResponses(envelope.method, std::move(chunks), correlationId, ticket);
+    return streamResponses(envelope.method, std::move(chunks), correlationId, shared_from_this());
   }
 
   if (entry.streaming) {

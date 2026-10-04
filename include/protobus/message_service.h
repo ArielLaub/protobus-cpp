@@ -11,6 +11,11 @@
 // rpc; implement those. Without codegen, derive from MessageService directly
 // and register handlers over dynamic messages with registerMethod().
 //
+// A service is owned by a std::shared_ptr (std::make_shared, or
+// RunnableService::start): each delivery holds a reference while its handler
+// runs, so a service released mid-request is destroyed once that request is
+// done, never under a running handler.
+//
 // A handler's exception decides what happens to the request. A HandledError
 // is an answer: it reaches the caller with its code and is never retried.
 // Anything else, or a processing timeout, is a failure: the request is retried
@@ -76,7 +81,7 @@ struct CallContext {
   const amqp::FieldTable* headers = nullptr;
 };
 
-class MessageService {
+class MessageService : public std::enable_shared_from_this<MessageService> {
  public:
   explicit MessageService(Context& context, MessageServiceOptions options = {});
   virtual ~MessageService();
@@ -96,6 +101,7 @@ class MessageService {
   virtual std::string Proto() const;
 
   // Register the schema if needed, declare the queues and start consuming.
+  // Throws std::logic_error unless the service is owned by a shared_ptr.
   virtual void init();
   // Stop accepting new requests and events, leaving channels open so work in
   // hand can finish: the first step of a graceful shutdown. Pair it with
@@ -166,8 +172,6 @@ class MessageService {
     std::function<std::string(const std::string& payload, CallContext& ctx)> unary;
     std::function<Generator<std::string>(const std::string& payload, std::shared_ptr<CallContext> ctx)> stream;
   };
-  struct Guard;
-
   // The request and context live in this frame for as long as the handler's
   // generator does: its body runs after the call that created it returns.
   template <typename Req, typename Res>
@@ -192,7 +196,6 @@ class MessageService {
   std::shared_ptr<MessageListener> listener_;
   std::shared_ptr<EventListener> eventListener_;
   std::shared_ptr<CancelListener> cancelListener_;
-  std::shared_ptr<Guard> guard_;
 
   mutable std::mutex mutex_;
   std::map<std::string, MethodEntry> methods_;
