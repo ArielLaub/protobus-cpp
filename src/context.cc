@@ -3,6 +3,7 @@
 #include <google/protobuf/descriptor.h>
 #include <google/protobuf/message.h>
 
+#include "protobus/config.h"
 #include "protobus/logger.h"
 
 namespace protobus {
@@ -53,7 +54,15 @@ void Context::close() {
   }
   for (auto id : listeners_) connection_->removeListener(id);
   listeners_.clear();
+  // Disconnecting stops new deliveries and hands unacknowledged ones back to
+  // the broker. Handlers already running refer to this context through their
+  // services, so it is not released until they are done, or until the drain
+  // budget runs out.
   connection_->disconnect();
+  if (!connection_->drainInFlight(Config::shutdownDrainTimeoutMs())) {
+    Logger::warn("Context: closing with " + std::to_string(connection_->inFlightDeliveries()) +
+                 " handler(s) still running after the drain timeout");
+  }
 }
 
 bool Context::isConnected() const { return connection_->isConnected(); }

@@ -5,7 +5,9 @@
 //   protobus::Context ctx;
 //   ctx.init("amqp://guest:guest@localhost:5672/", {"./proto"});
 //
-// A Context is not copyable. Destroying it closes the connection.
+// A Context is not copyable, and outlives every service and proxy built on
+// it. Destroying it closes the connection, then waits (up to
+// SHUTDOWN_DRAIN_TIMEOUT_MS) for handlers still running.
 #pragma once
 
 #include <memory>
@@ -41,7 +43,8 @@ class Context {
   void init(const std::string& amqpUrl, const std::vector<std::string>& protoLocations = {},
             const ContextOptions& options = {});
 
-  // Close the dispatchers and the connection. Safe to call more than once.
+  // Close the dispatchers and the connection, then wait for running handlers
+  // to finish, up to SHUTDOWN_DRAIN_TIMEOUT_MS. Safe to call more than once.
   void close();
 
   bool isConnected() const;
