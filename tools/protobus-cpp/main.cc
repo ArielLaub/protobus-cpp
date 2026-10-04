@@ -33,6 +33,7 @@
 #include <vector>
 
 #include "generator.h"
+#include "protobuf_compat.h"
 #include "protobus/custom_types.h"
 #include "protobus/version.h"
 #include "types_proto.h"
@@ -187,7 +188,7 @@ void writeFile(const fs::path& p, const std::string& text) {
 class StderrErrors : public gpb::io::ErrorCollector {
  public:
   explicit StderrErrors(std::string file) : file_(std::move(file)) {}
-  void RecordError(int line, gpb::io::ColumnNumber column, absl::string_view message) override {
+  void PROTOBUS_PB_ERROR(int line, gpb::io::ColumnNumber column, PROTOBUS_PB_TEXT message) override {
     std::cerr << file_ << ":" << line + 1 << ":" << column + 1 << ": " << message << "\n";
     failed = true;
   }
@@ -376,7 +377,7 @@ int generateService(const Options& o) {
   gpb::compiler::DiskSourceTree tree;
   tree.MapPath("", s.dir.string());
   struct Errors : gpb::compiler::MultiFileErrorCollector {
-    void RecordError(absl::string_view file, int line, int column, absl::string_view message) override {
+    void PROTOBUS_PB_ERROR(PROTOBUS_PB_TEXT file, int line, int column, PROTOBUS_PB_TEXT message) override {
       std::cerr << file << ":" << line + 1 << ":" << column + 1 << ": " << message << "\n";
     }
   } errors;

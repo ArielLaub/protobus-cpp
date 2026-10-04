@@ -190,8 +190,15 @@ TEST_F(StreamTest, ALostChunkFailsTheStreamRatherThanTruncatingIt) {
   RawReplier server(*ctx, {{0, false}, {2, true}});
   auto calc = proxy();
   auto stream = calc.ticks(ticks(3));
-  ASSERT_TRUE(stream.next());
-  EXPECT_THROW(stream.next(), protobus::StreamSequenceError);
+  // The gap fails the stream as soon as it is seen, discarding whatever was
+  // buffered, so the error may come before or after chunk 0 is read; what
+  // matters is that the stream never ends cleanly.
+  EXPECT_THROW(
+      {
+        while (stream.next()) {
+        }
+      },
+      protobus::StreamSequenceError);
 }
 
 TEST_F(StreamTest, ADuplicateChunkIsDropped) {

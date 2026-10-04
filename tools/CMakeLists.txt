@@ -10,7 +10,7 @@ add_executable(protoc-gen-protobus-cpp protoc-gen-protobus-cpp/main.cc)
 target_link_libraries(protoc-gen-protobus-cpp PRIVATE protobus_codegen)
 
 add_executable(protobus-cpp protobus-cpp/main.cc)
-target_include_directories(protobus-cpp PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
+target_include_directories(protobus-cpp PRIVATE ${CMAKE_CURRENT_BINARY_DIR} ${PROJECT_SOURCE_DIR}/src)
 target_link_libraries(protobus-cpp PRIVATE protobus_codegen protobus)
 protobus_warnings(protobus-cpp)
 

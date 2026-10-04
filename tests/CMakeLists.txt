@@ -29,7 +29,7 @@ file(GLOB integration_sources CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/inte
 if(integration_sources)
   add_executable(protobus_integration_tests ${integration_sources})
   target_include_directories(protobus_integration_tests PRIVATE ${PROJECT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR})
-  target_link_libraries(protobus_integration_tests PRIVATE pbtest_proto protobus GTest::gtest GTest::gtest_main)
+  target_link_libraries(protobus_integration_tests PRIVATE pbtest_proto protobus GTest::gtest_main)
   protobus_warnings(protobus_integration_tests)
   gtest_discover_tests(protobus_integration_tests DISCOVERY_TIMEOUT 60 PROPERTIES LABELS integration)
 endif()

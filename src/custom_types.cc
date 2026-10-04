@@ -19,11 +19,15 @@ namespace protobus {
 
 namespace {
 
+// 128-bit intermediates for the limb arithmetic. A GCC and Clang extension,
+// marked as one so -Wpedantic accepts it.
+__extension__ typedef unsigned __int128 u128;
+
 // a * m + carry over the limbs, returning the overflow limb.
 uint64_t mulSmall(std::array<uint64_t, 4>& limbs, uint64_t m, uint64_t add) {
-  unsigned __int128 carry = add;
+  u128 carry = add;
   for (auto& limb : limbs) {
-    const unsigned __int128 v = static_cast<unsigned __int128>(limb) * m + carry;
+    const u128 v = static_cast<u128>(limb) * m + carry;
     limb = static_cast<uint64_t>(v);
     carry = v >> 64;
   }
@@ -32,9 +36,9 @@ uint64_t mulSmall(std::array<uint64_t, 4>& limbs, uint64_t m, uint64_t add) {
 
 // Divide in place by d, returning the remainder.
 uint64_t divSmall(std::array<uint64_t, 4>& limbs, uint64_t d) {
-  unsigned __int128 rem = 0;
+  u128 rem = 0;
   for (int i = 3; i >= 0; --i) {
-    const unsigned __int128 cur = (rem << 64) | limbs[i];
+    const u128 cur = (rem << 64) | limbs[i];
     limbs[i] = static_cast<uint64_t>(cur / d);
     rem = cur % d;
   }
@@ -141,9 +145,9 @@ uint64_t Uint256::toUint64() const {
 
 Uint256 Uint256::operator+(const Uint256& o) const {
   Uint256 r;
-  unsigned __int128 carry = 0;
+  u128 carry = 0;
   for (size_t i = 0; i < 4; ++i) {
-    const unsigned __int128 v = static_cast<unsigned __int128>(limbs_[i]) + o.limbs_[i] + carry;
+    const u128 v = static_cast<u128>(limbs_[i]) + o.limbs_[i] + carry;
     r.limbs_[i] = static_cast<uint64_t>(v);
     carry = v >> 64;
   }
@@ -167,10 +171,10 @@ Uint256 Uint256::operator-(const Uint256& o) const {
 Uint256 Uint256::operator*(const Uint256& o) const {
   std::array<uint64_t, 8> wide{};
   for (size_t i = 0; i < 4; ++i) {
-    unsigned __int128 carry = 0;
+    u128 carry = 0;
     for (size_t j = 0; j < 4; ++j) {
-      const unsigned __int128 v =
-          static_cast<unsigned __int128>(limbs_[i]) * o.limbs_[j] + wide[i + j] + carry;
+      const u128 v =
+          static_cast<u128>(limbs_[i]) * o.limbs_[j] + wide[i + j] + carry;
       wide[i + j] = static_cast<uint64_t>(v);
       carry = v >> 64;
     }

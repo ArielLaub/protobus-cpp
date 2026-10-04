@@ -2,7 +2,10 @@
 
 include(CMakeFindDependencyMacro)
 find_dependency(Threads)
-find_dependency(protobuf CONFIG)
+find_package(protobuf CONFIG QUIET)
+if(NOT protobuf_FOUND)
+  find_dependency(Protobuf)
+endif()
 find_dependency(rabbitmq-c CONFIG)
 
 include("${CMAKE_CURRENT_LIST_DIR}/protobusTargets.cmake")

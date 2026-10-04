@@ -3,7 +3,9 @@
 #include <signal.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <atomic>
+#include <cerrno>
 #include <condition_variable>
 #include <cstdlib>
 #include <mutex>
@@ -113,6 +115,10 @@ void shutdown(const std::string& reason, int exitCode) {
     lifecycle().done = true;
     lifecycle().exitCode = exitCode;
     exitAfter = lifecycle().exitAfterShutdown;
+    // A process that goes on (one that turned the exit off) may start
+    // services again and shut them down again.
+    lifecycle().entries.clear();
+    lifecycle().shuttingDown = false;
   }
   lifecycle().cv.notify_all();
 
@@ -167,6 +173,8 @@ void RunnableService::installSignalHandlers() {
 
 void RunnableService::registerForShutdown(Context& context, std::shared_ptr<RunnableService> service) {
   std::lock_guard<std::mutex> lock(lifecycle().mutex);
+  // The first service after a completed shutdown starts a new lifecycle.
+  if (lifecycle().done && lifecycle().entries.empty()) lifecycle().done = false;
   lifecycle().entries.push_back(Entry{&context, std::move(service)});
 }
 

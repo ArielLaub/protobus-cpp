@@ -16,6 +16,7 @@
 //   message EventContainer    { string type = 1; string topic = 2; bytes data = 3; }
 #pragma once
 
+#include <cstdint>
 #include <optional>
 #include <stdexcept>
 #include <string>

@@ -21,7 +21,17 @@ include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
 
 find_package(Threads REQUIRED)
-find_package(protobuf CONFIG REQUIRED)
+
+# protobuf: its own CMake package where it ships one (protobuf 22 and later,
+# vcpkg, Homebrew), else CMake's FindProtobuf (the distribution packages of
+# protobuf 3.21, as on Debian and Ubuntu). Both provide protobuf::libprotobuf,
+# protobuf::libprotoc and protobuf::protoc.
+find_package(protobuf CONFIG QUIET)
+if(NOT protobuf_FOUND)
+  find_package(Protobuf 3.21 REQUIRED)
+  set(PROTOBUS_PROTOBUF_MODULE ON)
+endif()
+
 find_package(rabbitmq-c CONFIG REQUIRED)
 
 if(TARGET rabbitmq::rabbitmq)

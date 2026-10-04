@@ -8,11 +8,19 @@
 // submitting thread, never the I/O thread's frame handling for long: while
 // rabbitmq-c waits for an RPC reply it queues every other frame, and the loop
 // processes them as soon as the command returns.
+// rabbitmq-c 0.12 moved its headers under rabbitmq-c/; distributions still
+// ship 0.11.
+#if __has_include(<rabbitmq-c/amqp.h>)
 #include <rabbitmq-c/amqp.h>
-#include <fcntl.h>
-#include <poll.h>
 #include <rabbitmq-c/ssl_socket.h>
 #include <rabbitmq-c/tcp_socket.h>
+#else
+#include <amqp.h>
+#include <amqp_ssl_socket.h>
+#include <amqp_tcp_socket.h>
+#endif
+#include <fcntl.h>
+#include <poll.h>
 #include <sys/time.h>
 #include <unistd.h>
 
@@ -1069,6 +1077,21 @@ void RabbitChannel::onClose(std::function<void(const std::string& reason)> fn) {
 
 // ---- transport -----------------------------------------------------------------
 
+// Trust the system's certificate authorities when the URL names none.
+void useSystemCertificates(amqp_socket_t* socket) {
+#if AMQP_VERSION_MAJOR > 0 || AMQP_VERSION_MINOR >= 14
+  amqp_ssl_socket_enable_default_verify_paths(socket);
+#else
+  // rabbitmq-c before 0.14 cannot load the default paths itself: use the
+  // bundle the common distributions install.
+  for (const char* bundle : {"/etc/ssl/certs/ca-certificates.crt", "/etc/pki/tls/certs/ca-bundle.crt",
+                             "/etc/ssl/cert.pem", "/etc/ssl/ca-bundle.pem"}) {
+    if (::access(bundle, R_OK) == 0 && amqp_ssl_socket_set_cacert(socket, bundle) == AMQP_STATUS_OK) return;
+  }
+  throw AmqpError("no system certificate bundle found; name one with the cacertfile URL parameter", 0, false);
+#endif
+}
+
 class RabbitTransport : public Transport {
  public:
   std::shared_ptr<Connection> connect(const std::string& url, int heartbeatSeconds) override {
@@ -1096,7 +1119,7 @@ class RabbitTransport : public Transport {
             throw AmqpError("cannot load cacertfile " + it->second, 0, false);
           }
         } else {
-          amqp_ssl_socket_enable_default_verify_paths(socket);
+          useSystemCertificates(socket);
         }
         auto cert = u.query.find("certfile");
         auto key = u.query.find("keyfile");

@@ -15,6 +15,7 @@
 #include <functional>
 #include <sstream>
 
+#include "protobuf_compat.h"
 #include "protobus/errors.h"
 #include "protobus/logger.h"
 #include "protobus/types.pb.h"
@@ -33,7 +34,7 @@ std::string customTypeFile(const std::string& name) { return "protobus/custom/" 
 class CollectingErrors : public gpb::io::ErrorCollector {
  public:
   explicit CollectingErrors(std::string label) : label_(std::move(label)) {}
-  void RecordError(int line, gpb::io::ColumnNumber column, absl::string_view message) override {
+  void PROTOBUS_PB_ERROR(int line, gpb::io::ColumnNumber column, PROTOBUS_PB_TEXT message) override {
     if (!text_.empty()) text_ += "; ";
     text_ += "(" + label_ + ", line " + std::to_string(line + 1) + ":" + std::to_string(column + 1) + ") " +
              std::string(message);
@@ -47,8 +48,8 @@ class CollectingErrors : public gpb::io::ErrorCollector {
 
 class PoolErrors : public gpb::DescriptorPool::ErrorCollector {
  public:
-  void RecordError(absl::string_view filename, absl::string_view element, const gpb::Message*,
-                   ErrorLocation, absl::string_view message) override {
+  void PROTOBUS_PB_ERROR(PROTOBUS_PB_TEXT filename, PROTOBUS_PB_TEXT element, const gpb::Message*, ErrorLocation,
+                         PROTOBUS_PB_TEXT message) override {
     if (!text_.empty()) text_ += "; ";
     text_ += std::string(filename) + ": " + std::string(element) + ": " + std::string(message);
   }
