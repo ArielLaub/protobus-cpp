@@ -251,12 +251,14 @@ Staged stage(const Options& o) {
       std::set<std::string> declared;
       for (const auto& m : file.message_type()) collectTypes(m, used, declared);
       std::string imports;
+      std::set<std::string> added;
       for (const auto& t : protobus::getCustomTypes()) {
         const bool uses = used.count(t.name) || used.count("." + t.name);
         const bool local = declared.count(t.name) && file.package().empty();
         if (!uses || local) continue;
         const std::string dep = importFor(t);
         if (std::find(file.dependency().begin(), file.dependency().end(), dep) != file.dependency().end()) continue;
+        if (!added.insert(dep).second) continue;
         imports += "import \"" + dep + "\";\n";
       }
       if (!imports.empty()) {

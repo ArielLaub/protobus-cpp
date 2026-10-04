@@ -1,0 +1,91 @@
+// The unit and integration suites' schema. Like every shared protobus schema
+// it uses the custom types without importing them.
+syntax = "proto3";
+
+package pbtest;
+
+service Calc {
+  rpc add(AddRequest) returns (AddResponse);
+  rpc divide(DivideRequest) returns (DivideResponse);
+  // Throws: a HandledError when `handled`, a plain error otherwise.
+  rpc fail(FailRequest) returns (Nothing);
+  // Sleeps `ms`, watching its signal.
+  rpc slow(SlowRequest) returns (Nothing);
+  rpc ticks(TickRequest) returns (stream Tick);
+  rpc whoami(Nothing) returns (Who);
+  // Implemented by no test service: answers PROTOCOL_ERROR.
+  rpc unimplemented(Nothing) returns (Nothing);
+  rpc echo(Wallet) returns (Wallet);
+}
+
+message Nothing {}
+
+message AddRequest {
+  int32 a = 1;
+  int32 b = 2;
+}
+
+message AddResponse {
+  int32 result = 1;
+}
+
+message DivideRequest {
+  double dividend = 1;
+  double divisor = 2;
+}
+
+message DivideResponse {
+  double quotient = 1;
+}
+
+message FailRequest {
+  string id = 1;
+  bool handled = 2;
+}
+
+message SlowRequest {
+  int32 ms = 1;
+}
+
+message TickRequest {
+  int32 count = 1;
+  // Fail after this many chunks (0 = never).
+  int32 fail_at = 2;
+  bool unhandled = 3;
+  int32 delay_ms = 4;
+}
+
+message Tick {
+  int32 seq = 1;
+  string payload = 2;
+}
+
+message Who {
+  string actor = 1;
+  string message_id = 2;
+  string routing_key = 3;
+  bool redelivered = 4;
+}
+
+enum Kind {
+  KIND_UNKNOWN = 0;
+  KIND_SPOT = 1;
+}
+
+message Wallet {
+  bigint amount = 1;
+  timestamp at = 2;
+  map<string, bigint> balances = 3;
+  repeated bigint parts = 4;
+  Kind kind = 5;
+  int64 big = 6;
+}
+
+message Ping {
+  string id = 1;
+  bigint n = 2;
+}
+
+message Pong {
+  string id = 1;
+}

@@ -1,0 +1,23 @@
+// A dotted package, a nested message and rpcs named like a C++ keyword and a
+// framework member, to pin the generator's naming.
+syntax = "proto3";
+
+package deep.pkg;
+
+service Store {
+  rpc delete(Key) returns (Item);
+  rpc init(Key) returns (Item);
+  rpc list(Key) returns (stream Item);
+}
+
+message Key {
+  string id = 1;
+}
+
+message Item {
+  message Meta {
+    timestamp created = 1;
+  }
+  string id = 1;
+  Meta meta = 2;
+}

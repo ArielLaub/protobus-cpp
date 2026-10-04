@@ -563,17 +563,21 @@ void Connection::cancel(const std::shared_ptr<amqp::Channel>& channel, const std
 // ---- publishing ------------------------------------------------------------------
 
 std::shared_ptr<Connection::PublishState> Connection::publishStateFor(const std::shared_ptr<amqp::Channel>& channel) {
-  std::lock_guard<std::mutex> lock(publishMutex_);
-  auto it = publishStates_.find(channel.get());
-  if (it != publishStates_.end() && it->second->owner.lock() == channel) return it->second;
-
-  auto state = std::make_shared<PublishState>();
-  state->owner = channel;
-  publishStates_[channel.get()] = state;
+  std::shared_ptr<PublishState> state;
+  {
+    std::lock_guard<std::mutex> lock(publishMutex_);
+    auto it = publishStates_.find(channel.get());
+    if (it != publishStates_.end() && it->second->owner.lock() == channel) return it->second;
+    state = std::make_shared<PublishState>();
+    state->owner = channel;
+    publishStates_[channel.get()] = state;
+  }
 
   // A channel closing with publishes parked on the bound must release them,
   // or they wait forever for slots that will never free. Each is started and
-  // fails against the closed channel, settling its own slot.
+  // fails against the closed channel, settling its own slot. Registered
+  // outside the lock: on a channel that has already closed, the callback runs
+  // at once, on this thread.
   std::weak_ptr<Connection> weak = weak_from_this();
   std::weak_ptr<PublishState> weakState = state;
   const amqp::Channel* key = channel.get();

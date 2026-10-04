@@ -225,9 +225,12 @@ struct MemoryBroker::Impl : std::enable_shared_from_this<MemoryBroker::Impl> {
     exchanges["amq.fanout"] = Exchange{"fanout", true, false};
   }
 
+  // The threads own the broker's state, so the broker may be destroyed from
+  // inside one of its own callbacks.
   void start() {
-    dispatcher = std::thread([this] { dispatchLoop(); });
-    expirer = std::thread([this] { expiryLoop(); });
+    auto self = shared_from_this();
+    dispatcher = std::thread([self] { self->dispatchLoop(); });
+    expirer = std::thread([self] { self->expiryLoop(); });
   }
 
   void stop() {
@@ -240,8 +243,14 @@ struct MemoryBroker::Impl : std::enable_shared_from_this<MemoryBroker::Impl> {
       std::lock_guard<std::mutex> lock(mutex);
     }
     expiryCv.notify_all();
-    if (dispatcher.joinable()) dispatcher.join();
-    if (expirer.joinable()) expirer.join();
+    for (auto* t : {&dispatcher, &expirer}) {
+      if (!t->joinable()) continue;
+      if (t->get_id() == std::this_thread::get_id()) {
+        t->detach();
+      } else {
+        t->join();
+      }
+    }
   }
 
   void post(std::function<void()> fn) {
