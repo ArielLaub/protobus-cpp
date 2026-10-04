@@ -136,7 +136,9 @@ class MessageFactory {
 
  private:
   struct State;
-  void addFile(google::protobuf::FileDescriptorProto file, const std::string& label);
+  // Add every file, then build them, so files may import each other in any
+  // order. `label` names the schema in errors; empty uses each file's name.
+  void addFiles(std::vector<google::protobuf::FileDescriptorProto> files, const std::string& label = "");
   void injectCustomTypes(google::protobuf::FileDescriptorProto& file);
   void ensureCustomTypeFile(const CustomType& type);
   std::shared_ptr<State> state() const;

@@ -181,10 +181,9 @@ void MessageFactory::init(const std::vector<std::string>& protoLocations) {
     parsed.push_back(std::move(file));
     fresh->parsedSchemas.insert(f.text);
   }
-  for (auto& file : parsed) {
-    const std::string name = file.name();
-    addFile(std::move(file), name);
-  }
+  // Every file is added before any is built, so imports resolve whatever the
+  // order the files were found in.
+  addFiles(std::move(parsed));
   Logger::debug("message factory initialized");
 }
 
@@ -220,44 +219,49 @@ void MessageFactory::parse(const std::string& proto, const std::string& moduleNa
   file.set_name("protobus/parsed/" + std::to_string(std::hash<std::string>{}(proto)) + "/" +
                 (moduleName.empty() ? std::string("schema") : moduleName) + ".proto");
   injectCustomTypes(file);
-  addFile(std::move(file), label);
+  std::vector<gpb::FileDescriptorProto> files;
+  files.push_back(std::move(file));
+  addFiles(std::move(files), label);
   std::lock_guard<std::mutex> lock(st->buildMutex);
   st->parsedSchemas.insert(proto);
 }
 
-void MessageFactory::addFile(gpb::FileDescriptorProto file, const std::string& label) {
+void MessageFactory::addFiles(std::vector<gpb::FileDescriptorProto> files, const std::string& label) {
   auto st = state();
   std::lock_guard<std::mutex> lock(st->buildMutex);
-  // A schema whose every type is already known (compiled in, or loaded
-  // under another name) is the same schema arriving twice: skip it.
-  const auto symbols = topLevelSymbols(file);
-  if (!symbols.empty()) {
-    bool all = true;
-    bool any = false;
-    for (const auto& s : symbols) {
-      const bool known = st->pool->FindFileContainingSymbol(s) != nullptr;
-      all = all && known;
-      any = any || known;
-    }
-    if (all) {
-      Logger::debug("schema " + label + " is already loaded, skipping");
-      return;
-    }
-    if (any) {
+  std::vector<std::string> added;
+  for (auto& file : files) {
+    const std::string name = label.empty() ? file.name() : label;
+    // A schema whose every type is already known (compiled in, or loaded
+    // under another name) is the same schema arriving twice: skip it.
+    const auto symbols = topLevelSymbols(file);
+    if (!symbols.empty()) {
       std::string present;
+      size_t known = 0;
       for (const auto& s : symbols) {
-        if (st->pool->FindFileContainingSymbol(s) != nullptr) present += (present.empty() ? "" : ", ") + s;
+        if (st->pool->FindFileContainingSymbol(s) != nullptr) {
+          ++known;
+          present += (present.empty() ? "" : ", ") + s;
+        }
       }
-      throw SchemaError("schema " + label + " redefines types that are already loaded (" + present +
-                        "); a schema is added once, or every one of its types is new");
+      if (known == symbols.size()) {
+        Logger::debug("schema " + name + " is already loaded, skipping");
+        continue;
+      }
+      if (known > 0) {
+        throw SchemaError("schema " + name + " redefines types that are already loaded (" + present +
+                          "); a schema is added once, or every one of its types is new");
+      }
     }
+    if (st->pool->FindFileByName(file.name()) != nullptr) continue;
+    if (!st->runtime.Add(file)) throw SchemaError("schema " + name + " could not be added (duplicate file name?)");
+    st->runtimeFiles.insert(file.name());
+    added.push_back(file.name());
   }
-  if (st->pool->FindFileByName(file.name()) != nullptr) return;
-  const std::string name = file.name();
-  if (!st->runtime.Add(file)) throw SchemaError("schema " + label + " could not be added (duplicate file name?)");
-  st->runtimeFiles.insert(name);
-  if (st->pool->FindFileByName(name) == nullptr) {
-    throw SchemaError("schema " + label + " does not build: " + st->errors.take());
+  for (const auto& fileName : added) {
+    if (st->pool->FindFileByName(fileName) == nullptr) {
+      throw SchemaError("schema " + (label.empty() ? fileName : label) + " does not build: " + st->errors.take());
+    }
   }
 }
 

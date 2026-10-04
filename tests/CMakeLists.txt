@@ -12,12 +12,15 @@ endif()
 file(GLOB unit_sources CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/unit/*.cc)
 add_executable(protobus_unit_tests ${unit_sources})
 target_include_directories(protobus_unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(protobus_unit_tests PRIVATE pbtest_proto protobus GTest::gmock GTest::gtest_main)
+target_link_libraries(protobus_unit_tests PRIVATE pbtest_proto protobus GTest::gtest_main)
 target_compile_definitions(protobus_unit_tests PRIVATE
   PROTOBUS_TEST_PROTO_DIR="${CMAKE_CURRENT_SOURCE_DIR}/proto"
   PROTOBUS_CLI="$<TARGET_FILE:protobus-cpp>"
   PROTOBUS_PROTOC="$<TARGET_FILE:protobuf::protoc>"
-  PROTOBUS_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
+  PROTOBUS_SOURCE_DIR="${PROJECT_SOURCE_DIR}"
+  PROTOBUS_GENERATED_DIR="${PROTOBUS_GENERATED_DIR}"
+  PROTOBUS_CXX="${CMAKE_CXX_COMPILER}"
+  PROTOBUS_EXTRA_INCLUDES="-I$<JOIN:$<TARGET_PROPERTY:protobuf::libprotobuf,INTERFACE_INCLUDE_DIRECTORIES>, -I>")
 protobus_warnings(protobus_unit_tests)
 add_dependencies(protobus_unit_tests protobus-cpp)
 gtest_discover_tests(protobus_unit_tests DISCOVERY_TIMEOUT 60 PROPERTIES LABELS unit)
