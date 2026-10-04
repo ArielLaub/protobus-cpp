@@ -1,0 +1,8 @@
+// The text of protobus/types.proto, embedded so the CLI needs no data files.
+#pragma once
+
+namespace protobus::codegen {
+
+inline constexpr const char* kTypesProto = R"protobus_types(@PROTOBUS_TYPES_PROTO@)protobus_types";
+
+}  // namespace protobus::codegen

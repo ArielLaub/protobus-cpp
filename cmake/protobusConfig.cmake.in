@@ -1,0 +1,11 @@
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+find_dependency(Threads)
+find_dependency(protobuf CONFIG)
+find_dependency(rabbitmq-c CONFIG)
+
+include("${CMAKE_CURRENT_LIST_DIR}/protobusTargets.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/ProtobusGenerate.cmake")
+
+check_required_components(protobus)
