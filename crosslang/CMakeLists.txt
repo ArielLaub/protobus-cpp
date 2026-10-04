@@ -22,4 +22,4 @@ target_compile_definitions(protobus_crosslang_tests PRIVATE
   PROTOBUS_CPPPEER="$<TARGET_FILE:cpppeer>")
 add_dependencies(protobus_crosslang_tests cpppeer)
 protobus_warnings(protobus_crosslang_tests)
-gtest_discover_tests(protobus_crosslang_tests DISCOVERY_TIMEOUT 60 PROPERTIES LABELS crosslang TIMEOUT 600)
+gtest_discover_tests(protobus_crosslang_tests DISCOVERY_MODE PRE_TEST DISCOVERY_TIMEOUT 60 PROPERTIES LABELS crosslang TIMEOUT 600)

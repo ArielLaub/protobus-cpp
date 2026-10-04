@@ -1,0 +1,187 @@
+name: ci
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_call:
+
+permissions:
+  contents: read
+
+env:
+  # The suites never default to a broker; these point them at the service
+  # containers below.
+  PROTOBUS_TEST_AMQP_URL: amqp://guest:guest@127.0.0.1:25672/
+  PROTOBUS_TEST_MGMT_URL: http://guest:guest@127.0.0.1:25673
+
+jobs:
+  linux:
+    name: unit (Linux, GCC, distribution packages)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: dependencies (protobuf 3.21, rabbitmq-c 0.11)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y g++ cmake ninja-build libprotobuf-dev libprotoc-dev protobuf-compiler librabbitmq-dev libgtest-dev
+      - name: build (warnings are errors)
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DPROTOBUS_WERROR=ON
+          cmake --build build
+      - name: unit suite
+        # Broker suites are not run here: no broker is attached.
+        run: ctest --test-dir build -L unit --output-on-failure
+
+  macos:
+    name: unit (macOS, Clang, current protobuf)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: dependencies
+        run: brew install cmake ninja protobuf rabbitmq-c googletest
+      - name: build (warnings are errors)
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DPROTOBUS_WERROR=ON -DCMAKE_PREFIX_PATH="$(brew --prefix)"
+          cmake --build build
+      - name: unit suite
+        run: ctest --test-dir build -L unit --output-on-failure
+
+  # Each sanitizer runs where the prebuilt protobuf it links against keeps the
+  # same struct layout under it: protobuf changes some layouts for
+  # AddressSanitizer in current releases, and for ThreadSanitizer in 3.21.
+  sanitizers:
+    name: ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: ASan + UBSan + LSan (Linux)
+            os: ubuntu-24.04
+            option: PROTOBUS_SANITIZE
+          - name: TSan (macOS)
+            os: macos-15
+            option: PROTOBUS_TSAN
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y g++ cmake ninja-build libprotobuf-dev libprotoc-dev protobuf-compiler librabbitmq-dev libgtest-dev
+      - name: dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: brew install cmake ninja protobuf rabbitmq-c googletest
+      - name: build
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -D${{ matrix.option }}=ON \
+            -DPROTOBUS_BUILD_EXAMPLES=OFF -DCMAKE_PREFIX_PATH="$(brew --prefix 2>/dev/null || echo /usr)"
+          cmake --build build
+      - name: unit suite
+        env:
+          ASAN_OPTIONS: detect_leaks=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+          TSAN_OPTIONS: halt_on_error=1 suppressions=${{ github.workspace }}/tests/tsan.supp
+        run: ./build/tests/protobus_unit_tests
+
+  integration:
+    name: integration (RabbitMQ ${{ matrix.rabbitmq }})
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        rabbitmq: ["3-management", "4-management"]
+    services:
+      rabbitmq:
+        image: rabbitmq:${{ matrix.rabbitmq }}
+        ports:
+          - 25672:5672
+          - 25673:15672
+        options: >-
+          --health-cmd "rabbitmq-diagnostics -q ping"
+          --health-interval 5s --health-timeout 10s --health-retries 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y g++ cmake ninja-build libprotobuf-dev libprotoc-dev protobuf-compiler librabbitmq-dev libgtest-dev
+      - name: build
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build build
+      - name: integration suite
+        run: ctest --test-dir build -L integration --output-on-failure
+      - name: examples run end to end
+        env:
+          AMQP_URL: amqp://guest:guest@127.0.0.1:25672/
+          LOG_LEVEL: warn
+        run: |
+          ./build/examples/calculator
+          ./build/examples/tokenstream
+          ./build/examples/combat
+
+  cross-language:
+    name: cross-language (C++ <-> TypeScript <-> Python <-> Go)
+    runs-on: ubuntu-24.04
+    services:
+      rabbitmq:
+        image: rabbitmq:3-management
+        ports:
+          - 25672:5672
+          - 25673:15672
+        options: >-
+          --health-cmd "rabbitmq-diagnostics -q ping"
+          --health-interval 5s --health-timeout 10s --health-retries 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          path: protobus-cpp
+      # The peers are pinned: bump deliberately, after their own CI passes.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: ArielLaub/protobus
+          ref: b36406ce7fb692145845b352f7687fe8dbcff1c9 # 2.5.0
+          path: protobus
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: ArielLaub/protobus-py
+          ref: 398fd501fcadde7bdbb81293636ac1cd862b323d # 2.0.0
+          path: protobus-py
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: ArielLaub/protobus-go
+          ref: 1b13034a47fefd478433224f1362dee8cdea0f7e # 2.0.0, crosslang on TS 2.5.0
+          path: protobus-go
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: stable
+          cache-dependency-path: protobus-go/go.sum
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 20
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+      - name: build the TypeScript port
+        working-directory: protobus
+        run: npm ci && npm run build-ts
+      - name: install the Python port
+        working-directory: protobus-py
+        run: python -m venv venv && venv/bin/pip install -e .
+      - name: dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y g++ cmake ninja-build libprotobuf-dev libprotoc-dev protobuf-compiler librabbitmq-dev libgtest-dev
+      - name: build
+        working-directory: protobus-cpp
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DPROTOBUS_BUILD_EXAMPLES=OFF
+          cmake --build build
+      - name: cross-language suite
+        working-directory: protobus-cpp
+        env:
+          PROTOBUS_TS: ${{ github.workspace }}/protobus
+          PROTOBUS_PY: ${{ github.workspace }}/protobus-py
+          PROTOBUS_GO: ${{ github.workspace }}/protobus-go
+        run: ./build/crosslang/protobus_crosslang_tests
