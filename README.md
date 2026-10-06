@@ -18,7 +18,8 @@ and [protobus-go](https://github.com/ArielLaub/protobus-go) (Go), designed
 after the TypeScript reference class for class. The four are
 **wire-compatible**: a C++ service serves TypeScript, Python and Go callers and
 the other way round, with streaming, events, custom types and error codes
-included. See [Compatibility](docs/compatibility.md).
+included. See [Compatibility](docs/compatibility.md) and
+[Other languages](docs/README.md#other-languages).
 
 **Status: new.** 2.0.0 is the first release of the C++ port. It is at feature
 parity with the TypeScript port, and its CI runs it against the TypeScript,
