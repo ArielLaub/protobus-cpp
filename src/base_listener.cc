@@ -178,6 +178,7 @@ void BaseListener::scheduleRebuild(const std::string& reason) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (rebuildScheduled_ || closing_ || !initialized_) return;
     rebuildScheduled_ = true;
+    rebuildFor_ = channel_;
     failures = rebuildFailures_;
   }
   const int64_t delay = std::min<int64_t>(int64_t{100} << std::min(failures, 9), 30000);
@@ -202,9 +203,20 @@ void BaseListener::rebuild() {
       consumerLost_ = false;
       return;
     }
-    ++rebuildFailures_;
+    // A channel lost with its connection can report its close before the
+    // connection reports the loss, and so look lost on a live connection.
+    // The reconnection restores the listener on a new channel; rebuilding
+    // that one again would replace a working consumer (for a reply queue,
+    // stranding the replies of calls in flight).
+    if (rebuildFor_.lock() != channel_) return;
   }
   if (!connection_->isReady()) return;
+  {
+    // Counted only for an attempt actually made, so skipped rebuilds do not
+    // stretch the backoff.
+    std::lock_guard<std::mutex> lock(mutex_);
+    ++rebuildFailures_;
+  }
   try {
     restore();
     std::lock_guard<std::mutex> lock(mutex_);

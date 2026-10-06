@@ -111,6 +111,10 @@ class BaseListener : public std::enable_shared_from_this<BaseListener> {
   int rebuildFailures_ = 0;
   // The broker cancelled the consumer; a rebuild is putting it back.
   bool consumerLost_ = false;
+  // The channel the pending rebuild is for. Replaced by the time the rebuild
+  // runs (a reconnection restored the listener first), there is nothing
+  // left to rebuild.
+  std::weak_ptr<amqp::Channel> rebuildFor_;
   // One restoration at a time, whoever runs it (the reconnection, a rebuild):
   // two at once would leave two consumers.
   std::mutex restoreMutex_;
