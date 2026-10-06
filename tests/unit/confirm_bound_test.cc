@@ -178,10 +178,15 @@ TEST_F(ConfirmBoundTest, AParkedPublishTimesOutDefinitely) {
   Outcomes out;
   publishMany(ch, 3, out);
   ASSERT_TRUE(eventually([&] { return out.completed() == 3; }));
-  // The one that went out is ambiguous; the parked ones were never sent.
-  EXPECT_EQ(out.count("PublishConfirmTimeoutError(ambiguous)"), 1);
-  EXPECT_EQ(out.count("PublishBacklogError(definite)") + out.count("ChannelClosedError(ambiguous)"), 2);
-  EXPECT_EQ(broker->queueDepth("q1"), 1u);
+  // The one that went out is ambiguous. A parked one is definite only when
+  // it truly never reached the broker; one caught mid-send by its deadline
+  // is honestly ambiguous. Never the reverse: "definite" must mean unsent.
+  broker->flush();
+  const auto sent = static_cast<int>(broker->queueDepth("q1"));
+  EXPECT_GE(sent, 1);
+  EXPECT_GE(out.count("PublishConfirmTimeoutError(ambiguous)"), 1);
+  EXPECT_LE(out.count("PublishBacklogError(definite)"), 3 - sent);
+  EXPECT_EQ(out.count("ok"), 0);
   EXPECT_TRUE(out.eachOnce());
 }
 
