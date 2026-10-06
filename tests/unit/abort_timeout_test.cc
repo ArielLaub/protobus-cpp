@@ -161,7 +161,10 @@ TEST_F(AbortTimeoutTest, AnAbortListenerNeverOutlivesItsService) {
         if (listenerServiceDestroyed.load()) ++listenerSawDestroyed;
         ++listenerRuns;
       });
-      std::this_thread::sleep_for(std::chrono::milliseconds(r.ms()));
+      // Returns only once the timeout has fired, so the abort (and with it
+      // the listener) always starts while the handler is still running,
+      // however slowly the workers are scheduled.
+      ctx.signal.waitFor(std::chrono::milliseconds(r.ms()));
       return {};
     }
   };
@@ -175,7 +178,7 @@ TEST_F(AbortTimeoutTest, AnAbortListenerNeverOutlivesItsService) {
   svc->init();
   auto calc = proxy();
   pbtest::SlowRequest r;
-  r.set_ms(40);
+  r.set_ms(10000);
   try {
     calc.slow(r);
   } catch (const protobus::RemoteError& e) {
