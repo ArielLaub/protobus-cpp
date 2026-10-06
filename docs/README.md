@@ -20,3 +20,19 @@
 
 The C++ snippets marked for it in these pages are compiled by the test suite
 (`scripts/check-doc-snippets.py`), so they track the API.
+
+## Other languages
+
+The `.proto` files are the contract and RabbitMQ does the routing, so a port
+needs only protobuf and an AMQP client.
+
+| Language | Repo | Status |
+|---|---|---|
+| TypeScript | [protobus](https://github.com/ArielLaub/protobus) | stable (reference) |
+| Python | [protobus-py](https://github.com/ArielLaub/protobus-py) | stable |
+| Go | [protobus-go](https://github.com/ArielLaub/protobus-go) | stable |
+| C++ | [protobus-cpp](https://github.com/ArielLaub/protobus-cpp) (this repository) | new |
+
+This port's CI runs it against the TypeScript, Python and Go ports' real
+libraries, in both directions; the differences that remain are listed in
+[Compatibility](compatibility.md).

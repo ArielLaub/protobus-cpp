@@ -56,7 +56,7 @@ seen in sequence; requests are handled in parallel up to the service's
   generator), so releasing a service mid-request destroys it when that request
   is done, never under a running handler.
 - Components register with the connection through weak references, so a
-  component destroyed between a reconnection and its restoration is simply
+  component destroyed between a reconnection and its restoration is
   skipped.
 - A `Stream` holds what its call needs; it stays safe to use, or destroy,
   after its proxy is gone.
