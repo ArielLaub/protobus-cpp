@@ -89,6 +89,11 @@ struct PublishOp {
   std::atomic<bool> settled{false};
   std::atomic<bool> resolved{false};
   std::atomic<uint64_t> timer{0};
+  // Who decides the publish's fate, exactly once: the sender (kSending: from
+  // then on a timeout is ambiguous) or the deadline (kAbandoned: it was never
+  // handed to the transport, and now never will be).
+  static constexpr int kPending = 0, kSending = 1, kAbandoned = 2;
+  std::atomic<int> phase{kPending};
   // Guarded by the PublishState's mutex.
   bool parked = false;
   bool timedOut = false;
@@ -729,9 +734,10 @@ void Connection::confirmedPublish(const std::shared_ptr<amqp::Channel>& channel,
   };
 
   auto start = [=]() {
-    // Its caller gave up while it waited for a slot: nothing is sent, and the
-    // answer it already has (ambiguous) remains true.
-    if (op->settled.load()) {
+    // Its deadline passed while it waited for a slot, and its caller was told
+    // it was never sent: keep that true.
+    int pending = PublishOp::kPending;
+    if (!op->phase.compare_exchange_strong(pending, PublishOp::kSending)) {
       release();
       return;
     }
@@ -776,15 +782,15 @@ void Connection::confirmedPublish(const std::shared_ptr<amqp::Channel>& channel,
   auto onTimeout = [op, weakState, finish, describe, confirmTimeout, messageId, maxOutstanding] {
     auto st = weakState.lock();
     if (!st) return;
-    bool wasParked = false;
+    int pending = PublishOp::kPending;
+    const bool neverSent = op->phase.compare_exchange_strong(pending, PublishOp::kAbandoned);
     std::shared_ptr<amqp::Channel> retire;
     {
       std::lock_guard<std::mutex> lock(st->mutex);
       if (op->parked) {
         st->waiters.erase(op->waiterId);
         op->parked = false;
-        wasParked = true;
-      } else if (!op->resolved.load() && !op->timedOut) {
+      } else if (!neverSent && !op->resolved.load() && !op->timedOut) {
         op->timedOut = true;
         ++st->timedOut;
         if (st->timedOut >= maxOutstanding && !st->retired && !st->closed) {
@@ -793,7 +799,7 @@ void Connection::confirmedPublish(const std::shared_ptr<amqp::Channel>& channel,
         }
       }
     }
-    if (wasParked) {
+    if (neverSent) {
       finish(std::make_exception_ptr(PublishBacklogError(
           describe + " was not published: no confirm slot freed within " + std::to_string(confirmTimeout) + "ms",
           messageId)));
