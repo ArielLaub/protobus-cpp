@@ -30,6 +30,7 @@ inline constexpr const char* kPublishNacked = "PUBLISH_NACKED";
 inline constexpr const char* kUnroutable = "UNROUTABLE";
 inline constexpr const char* kPublishConfirmTimeout = "PUBLISH_CONFIRM_TIMEOUT";
 inline constexpr const char* kChannelClosed = "CHANNEL_CLOSED";
+inline constexpr const char* kPublishBacklog = "PUBLISH_BACKLOG";
 }  // namespace codes
 
 // Base of every protobus error.
@@ -162,6 +163,15 @@ class ChannelClosedError : public PublishError {
   bool ambiguous() const noexcept override { return true; }
 };
 
+// The publish was refused before it was sent: the channel's
+// outstanding-confirm bound was full and its queue of parked publishes too
+// (MAX_PARKED_PUBLISHES), or the publish waited out its confirm timeout
+// parked. Definite: nothing reached the broker, so republishing is safe.
+class PublishBacklogError : public PublishError {
+ public:
+  PublishBacklogError(const std::string& message, std::string messageId);
+};
+
 // Streaming failures, raised on the caller's side.
 class StreamingError : public Error {
  public:
@@ -202,11 +212,11 @@ class AlreadyConnectedError : public Error {
   AlreadyConnectedError();
 };
 
-// A call was in flight when the connection was lost. The request may or may
-// not have been processed.
+// A call was in flight when the connection was lost or closed. The request
+// may or may not have been processed.
 class DisconnectedError : public Error {
  public:
-  DisconnectedError();
+  explicit DisconnectedError(const std::string& message = "Connection lost during RPC call");
 };
 
 class NotConnectedError : public Error {

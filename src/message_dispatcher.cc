@@ -47,6 +47,8 @@ struct StreamRegistry {
   std::weak_ptr<Connection> connection;
   // Publishes the cancellation notice for a stream. Fire-and-forget.
   std::function<void(const std::string& id)> publishCancel;
+  // Set by MessageDispatcher::close(): no new stream may register.
+  bool closed = false;
 
   void releaseBytes(int64_t n) { totalBufferedBytes = std::max<int64_t>(0, totalBufferedBytes - n); }
 
@@ -88,21 +90,55 @@ struct StreamRegistry {
       std::unique_lock<std::mutex> lock(registry->mutex);
       call->idleTimer = 0;
       if (call->ended) return;
-      call->error = std::make_exception_ptr(
-          StreamTimeoutError("No streaming chunk received within " + std::to_string(call->idleTimeoutMs) + "ms"));
-      call->ended = true;
       // The producer is still generating for a caller that stopped
-      // listening: tell it to stop. cancel() is also what returns the
+      // listening: tell it to stop. Cancelling is also what returns the
       // buffered bytes to the process-wide allowance.
-      registry->cancelLocked(call, true, lock);
-      call->cv.notify_all();
+      registry->failLocked(call,
+                           std::make_exception_ptr(StreamTimeoutError("No streaming chunk received within " +
+                                                                      std::to_string(call->idleTimeoutMs) + "ms")),
+                           lock);
     });
   }
 
+  // End every pending stream with `error`: the iterators throw it on their
+  // next call. `final` is for an explicit close, after which there is no
+  // channel to send a cancellation notice on, so none is attempted later.
+  void failAllLocked(const std::exception_ptr& error, bool final) {
+    for (auto& [_, stream] : pending) {
+      stream->error = error;
+      stream->ended = true;
+      clearIdle(*stream);
+      // Its bytes leave the process-wide total with it, so a later release
+      // cannot subtract them from a total that no longer holds them.
+      stream->chunks.clear();
+      stream->bufferedBytes = 0;
+      if (final) {
+        releaseSignal(*stream);
+        stream->cancelled = true;
+      }
+      stream->cv.notify_all();
+    }
+    pending.clear();
+    totalBufferedBytes = 0;
+  }
+
+  // The caller's side failed the stream (a buffer limit, a lost chunk): keep
+  // the error for the iterator and tell the producer to stop. Once only, and
+  // the call leaves `pending`, so whatever the producer sends meanwhile is
+  // ignored.
+  void failLocked(const std::shared_ptr<StreamCall>& call, std::exception_ptr error,
+                  std::unique_lock<std::mutex>& lock) {
+    call->error = std::move(error);
+    call->ended = true;
+    call->cv.notify_all();
+    cancelLocked(call, true, lock);
+  }
+
   // Stop the producer and release everything the call holds. `notifyOnly` is
-  // for the idle path, which has already recorded the error the iterator is
-  // about to raise. Best effort and at most once: a lost notice means the
-  // producer runs to completion, the same as never cancelling.
+  // for a failure path (idle, backpressure, sequence), which has already
+  // recorded the error the iterator is about to raise. Best effort and at
+  // most once: a lost notice means the producer runs to completion, the same
+  // as never cancelling.
   void cancelLocked(const std::shared_ptr<StreamCall>& call, bool notifyOnly, std::unique_lock<std::mutex>& lock) {
     if (call->cancelled) return;
     call->cancelled = true;
@@ -243,7 +279,13 @@ struct MessageDispatcher::PendingCall {
   bool done = false;
   std::string reply;
   std::exception_ptr error;
+  // The deadline timer. Guarded by the dispatcher's mutex_, under which it is
+  // armed in the same step that registers the call: whoever takes the call
+  // out of callbacks_ also takes the timer, and none can miss it.
   uint64_t timer = 0;
+  // The broker confirmed the request: a timeout after this is a missing
+  // reply, not a missing request.
+  std::atomic<bool> confirmed{false};
 
   void resolve(std::string value) {
     {
@@ -294,6 +336,14 @@ std::string MessageDispatcher::callbackQueue() const { return callbackListener_-
 
 void MessageDispatcher::init() {
   if (isInitialized()) return;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    closed_ = false;
+  }
+  {
+    std::lock_guard<std::mutex> lock(streams_->mutex);
+    streams_->closed = false;
+  }
   std::weak_ptr<MessageDispatcher> weak = weak_from_this();
   disconnectedListener_ = connection_->onDisconnected([weak] {
     if (auto self = weak.lock()) self->onDisconnected();
@@ -394,31 +444,48 @@ void MessageDispatcher::publishCancel(const std::string& id) {
 
 void MessageDispatcher::onDisconnected() {
   Logger::debug("MessageDispatcher: connection lost, rejecting pending callbacks");
-  std::map<std::string, std::shared_ptr<PendingCall>> calls;
   {
     std::lock_guard<std::mutex> lock(mutex_);
     channel_.reset();
+  }
+  failPending(std::make_exception_ptr(DisconnectedError()), false);
+}
+
+// Every pending call and stream ends with `error`, timers cancelled and
+// buffers released. Each call is completed by exactly one party: whoever
+// takes it out of callbacks_.
+void MessageDispatcher::failPending(const std::exception_ptr& error, bool final) {
+  std::map<std::string, std::shared_ptr<PendingCall>> calls;
+  std::vector<uint64_t> timers;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
     calls.swap(callbacks_);
+    for (auto& [_, call] : calls) {
+      timers.push_back(call->timer);
+      call->timer = 0;
+    }
   }
-  const auto error = std::make_exception_ptr(DisconnectedError());
-  for (auto& [_, call] : calls) {
-    connection_->scheduler().cancel(call->timer);
-    call->fail(error);
-  }
-  // Tear down in-flight streams: their iterators throw on the next call.
+  for (auto t : timers) connection_->scheduler().cancel(t);
+  for (auto& [_, call] : calls) call->fail(error);
   std::lock_guard<std::mutex> lock(streams_->mutex);
-  for (auto& [_, stream] : streams_->pending) {
-    stream->error = error;
-    stream->ended = true;
-    streams_->clearIdle(*stream);
-    // Its bytes leave the process-wide total with it, so a later release
-    // cannot subtract them from a total that no longer holds them.
-    stream->chunks.clear();
-    stream->bufferedBytes = 0;
-    stream->cv.notify_all();
+  streams_->failAllLocked(error, final);
+}
+
+std::shared_ptr<MessageDispatcher::PendingCall> MessageDispatcher::takeCall(const std::string& id,
+                                                                             const PendingCall* expected) {
+  std::shared_ptr<PendingCall> call;
+  uint64_t timer = 0;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = callbacks_.find(id);
+    if (it == callbacks_.end() || (expected != nullptr && it->second.get() != expected)) return nullptr;
+    call = std::move(it->second);
+    callbacks_.erase(it);
+    timer = call->timer;
+    call->timer = 0;
   }
-  streams_->pending.clear();
-  streams_->totalBufferedBytes = 0;
+  if (timer != 0) connection_->scheduler().cancel(timer);
+  return call;
 }
 
 // A failure propagates: a dispatcher with no channel cannot publish, so the
@@ -458,14 +525,11 @@ void MessageDispatcher::onResult(const std::string& content, const std::string& 
           return;
         }
         if (*seq > expected) {
-          stream->error = std::make_exception_ptr(
-              StreamSequenceError("stream " + id + " lost at least one chunk: got seq=" + std::to_string(*seq) +
-                                  ", expected " + std::to_string(expected)));
-          stream->ended = true;
-          streams_->releaseBytes(stream->bufferedBytes);
-          stream->bufferedBytes = 0;
-          stream->chunks.clear();
-          stream->cv.notify_all();
+          streams_->failLocked(stream,
+                               std::make_exception_ptr(StreamSequenceError(
+                                   "stream " + id + " lost at least one chunk: got seq=" + std::to_string(*seq) +
+                                   ", expected " + std::to_string(expected))),
+                               lock);
           return;
         }
         stream->lastSeq = seq;
@@ -484,17 +548,15 @@ void MessageDispatcher::onResult(const std::string& content, const std::string& 
         const int64_t wouldBeTotal = streams_->totalBufferedBytes + size;
         if (static_cast<int64_t>(stream->chunks.size()) + 1 > maxChunks || wouldBeBytes > maxBytes ||
             wouldBeTotal > maxTotal) {
-          stream->error = std::make_exception_ptr(StreamBackpressureError(
-              "stream " + id + " exceeded a buffer limit (" + std::to_string(stream->chunks.size() + 1) +
-              " chunks / " + std::to_string(wouldBeBytes) + " bytes for this call, " +
-              std::to_string(wouldBeTotal) + " bytes across all calls; limits are " + std::to_string(maxChunks) +
-              " chunks / " + std::to_string(maxBytes) + " bytes / " + std::to_string(maxTotal) +
-              " bytes total) - the consumer is not keeping up with the producer"));
-          stream->ended = true;
-          streams_->releaseBytes(stream->bufferedBytes);
-          stream->bufferedBytes = 0;
-          stream->chunks.clear();
-          stream->cv.notify_all();
+          streams_->failLocked(
+              stream,
+              std::make_exception_ptr(StreamBackpressureError(
+                  "stream " + id + " exceeded a buffer limit (" + std::to_string(stream->chunks.size() + 1) +
+                  " chunks / " + std::to_string(wouldBeBytes) + " bytes for this call, " +
+                  std::to_string(wouldBeTotal) + " bytes across all calls; limits are " +
+                  std::to_string(maxChunks) + " chunks / " + std::to_string(maxBytes) + " bytes / " +
+                  std::to_string(maxTotal) + " bytes total) - the consumer is not keeping up with the producer")),
+              lock);
           return;
         }
         stream->chunks.push_back(content);
@@ -508,16 +570,7 @@ void MessageDispatcher::onResult(const std::string& content, const std::string& 
     }
   }
 
-  std::shared_ptr<PendingCall> call;
-  {
-    std::lock_guard<std::mutex> lock(mutex_);
-    auto it = callbacks_.find(id);
-    if (it == callbacks_.end()) return;
-    call = it->second;
-    callbacks_.erase(it);
-  }
-  connection_->scheduler().cancel(call->timer);
-  call->resolve(content);
+  if (auto call = takeCall(id)) call->resolve(content);
 }
 
 // A reconnection in progress is waited through rather than failed on: the
@@ -557,39 +610,51 @@ std::string MessageDispatcher::publish(const std::string& content, const std::st
 
   const int64_t limit = options.timeoutMs.value_or(Config::rpcCallTimeoutMs());
 
-  // Armed BEFORE publishing: a fast service can reply while the confirm is
-  // still in flight, and a reply finding no entry is dropped.
+  // The deadline covers the broker confirm as well as the reply: the request
+  // is published asynchronously, and the call ends at the first of its reply,
+  // a definite publish failure, the deadline, a disconnect or a close. The
+  // call is registered BEFORE publishing, since a fast service can reply
+  // while the confirm is still in flight, and a reply finding no entry is
+  // dropped.
   auto call = std::make_shared<PendingCall>();
+  std::weak_ptr<MessageDispatcher> weak = weak_from_this();
   {
     std::lock_guard<std::mutex> lock(mutex_);
+    if (closed_) throw NotConnectedError("the message dispatcher is closed");
     callbacks_[id] = call;
+    call->timer = connection_->scheduler().schedule(
+        std::chrono::milliseconds(limit), [weak, id, call, routingKey, limit] {
+          auto self = weak.lock();
+          if (!self || !self->takeCall(id, call.get())) return;
+          std::string message =
+              "no reply for " + routingKey + " (correlationId " + id + ") within " + std::to_string(limit) + "ms";
+          // Honest about what is known: without a confirm the request may or
+          // may not have reached the broker.
+          if (!call->confirmed.load()) message += "; the broker had not confirmed the request either";
+          call->fail(std::make_exception_ptr(RpcTimeoutError(message)));
+        });
   }
-  std::weak_ptr<MessageDispatcher> weak = weak_from_this();
-  call->timer = connection_->scheduler().schedule(std::chrono::milliseconds(limit), [weak, id, call, routingKey,
-                                                                                     limit] {
-    if (auto self = weak.lock()) {
-      std::lock_guard<std::mutex> lock(self->mutex_);
-      auto it = self->callbacks_.find(id);
-      if (it == self->callbacks_.end() || it->second != call) return;
-      self->callbacks_.erase(it);
-    }
-    call->fail(std::make_exception_ptr(RpcTimeoutError("no reply for " + routingKey + " (correlationId " + id +
-                                                       ") within " + std::to_string(limit) + "ms")));
-  });
 
+  std::shared_ptr<amqp::Channel> ch;
   try {
-    connection_->publish(publishChannel(), Config::busExchangeName(), routingKey, content, std::move(p));
+    ch = publishChannel();
   } catch (...) {
-    // The request never made it, so no reply is coming. Release the slot
-    // now and report the publish failure: it is the more specific answer.
-    {
-      std::lock_guard<std::mutex> lock(mutex_);
-      auto it = callbacks_.find(id);
-      if (it != callbacks_.end() && it->second == call) callbacks_.erase(it);
-    }
-    connection_->scheduler().cancel(call->timer);
-    throw;
+    if (auto taken = takeCall(id, call.get())) taken->fail(std::current_exception());
+    return call->wait();
   }
+  // A publish failure is the more specific answer, when it comes first: a
+  // nack or a return is definite, a closed channel or a confirm timeout
+  // ambiguous. One arriving after the reply or the deadline changes nothing.
+  connection_->publishAsync(ch, Config::busExchangeName(), routingKey, content, std::move(p),
+                            [weak, id, call](std::exception_ptr err) {
+                              if (!err) {
+                                call->confirmed = true;
+                                return;
+                              }
+                              auto self = weak.lock();
+                              if (!self || !self->takeCall(id, call.get())) return;
+                              call->fail(std::move(err));
+                            });
   return call->wait();
 }
 
@@ -606,6 +671,7 @@ ChunkStream MessageDispatcher::publishStreaming(const std::string& content, cons
   const bool abortedBeforeStart = options.signal && options.signal->aborted();
   {
     std::unique_lock<std::mutex> lock(streams_->mutex);
+    if (streams_->closed) throw NotConnectedError("the message dispatcher is closed");
     if (abortedBeforeStart) {
       // Aborted before it began: nothing to send and nothing to wait for.
       call->ended = true;
@@ -651,6 +717,18 @@ ChunkStream MessageDispatcher::publishStreaming(const std::string& content, cons
 }
 
 void MessageDispatcher::close() {
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    closed_ = true;
+  }
+  {
+    std::lock_guard<std::mutex> lock(streams_->mutex);
+    streams_->closed = true;
+  }
+  // Nothing more can arrive for what is pending: the reply queue goes with
+  // this close. End it all now rather than at each call's own deadline.
+  failPending(std::make_exception_ptr(DisconnectedError("the message dispatcher was closed with the call pending")),
+              true);
   if (disconnectedListener_) {
     connection_->removeListener(*disconnectedListener_);
     disconnectedListener_.reset();

@@ -31,6 +31,14 @@ that does not decode is answered `PROTOCOL_ERROR`.
 Event handlers are selected by the routing key the broker delivered on, not
 by the topic the publisher wrote into the event.
 
+The retry ladder routes the same way. A failed request or event is
+republished, under this consumer's credentials, with the routing key it was
+delivered on; the `x-original-routing-key` header is rewritten from that key
+and never read for routing, since the original publisher could have written
+anything into it. Otherwise a publisher allowed only `EVENT.allowed` could
+forge the header and have a subscriber's retry carry its message to the
+handler for `EVENT.privileged`.
+
 ## What callers see
 
 A `HandledError`'s message always reaches the caller: raising one is a

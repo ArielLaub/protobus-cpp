@@ -53,6 +53,12 @@ class MemoryBroker : public amqp::Transport, public std::enable_shared_from_this
   // While set, connect() throws AmqpError.
   void refuseConnections(bool refuse);
   void setConfirmMode(ConfirmMode mode);
+  // The publishes ConfirmMode::Drop is holding, across every open channel:
+  // what the transport still has unresolved.
+  size_t heldConfirms() const;
+  // Deliver every held confirm now, as `outcome`: a broker confirming late.
+  // Returns how many were delivered.
+  size_t releaseHeldConfirms(amqp::ConfirmOutcome outcome = amqp::ConfirmOutcome::Ack);
 
   // Close every channel that has `queue` declared or consumed, as a broker
   // would close a channel over a consumer error. Used to test recovery from a

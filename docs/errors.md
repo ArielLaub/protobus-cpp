@@ -67,7 +67,7 @@ The retry and dead-letter copies are republished, keeping `contentType`,
 | Header | |
 |---|---|
 | `x-retry-count` | Retries so far |
-| `x-original-routing-key` | `REQUEST.<Service>.<method>` |
+| `x-original-routing-key` | `REQUEST.<Service>.<method>`: the key the message was delivered under. Informational: the retry is routed by the delivered key, never by this header, which the original publisher could have written |
 | `x-first-failure-time` | Milliseconds since the epoch |
 | `x-last-error` | The error's class and code, e.g. `std::runtime_error` or `TimeoutError[PROCESSING_TIMEOUT]`; never an unhandled error's message, which routinely quotes the data that caused it |
 | `x-original-queue` | On the DLQ: the service's queue |
@@ -116,6 +116,7 @@ with it instead.
 | `UNROUTABLE` | `UnroutableError` | a mandatory publish matched no queue |
 | `PUBLISH_CONFIRM_TIMEOUT` | `PublishConfirmTimeoutError` | no confirm in time (ambiguous) |
 | `CHANNEL_CLOSED` | `ChannelClosedError` | the channel closed unconfirmed (ambiguous) |
+| `PUBLISH_BACKLOG` | `PublishBacklogError` | refused before it was sent: the channel's confirm bound and parked queue were full, or the publish waited out its confirm timeout parked (definite) |
 
 The first four cross the wire in a `ResponseError` and are shared by every
 port. Every protobus exception derives from `protobus::Error`, with `name()`

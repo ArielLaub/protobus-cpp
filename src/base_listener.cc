@@ -89,13 +89,16 @@ void BaseListener::onDisconnected() {
 // as unusable and retries: a half-restored listener beside a connection that
 // believes it is healthy is the worst of both.
 void BaseListener::restore() {
+  std::lock_guard<std::mutex> serial(restoreMutex_);
   std::vector<std::string> bindings;
   bool wasStarted;
+  std::shared_ptr<amqp::Channel> previous;
   {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (!initialized_) return;
+    if (!initialized_ || closing_) return;
     bindings = bindings_;
     wasStarted = wasStarted_;
+    previous = channel_;
   }
   Logger::info(std::string(listenerName()) + ": reconnected, re-initializing...");
   reinitialize();
@@ -106,7 +109,23 @@ void BaseListener::restore() {
     Logger::debug(std::string(listenerName()) + ": re-bound " + routingKey);
   }
   restoreTopology();
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    wasStarted = wasStarted && wasStarted_ && !closing_;
+    consumerLost_ = false;
+  }
   if (wasStarted) startConsuming();
+  // The channel this replaces can still be open: one whose consumer the
+  // broker cancelled. Closed only now, once channel_ no longer names it, so
+  // its close is not mistaken for a loss to rebuild from, and so it cannot
+  // keep a second consumer alive.
+  if (previous && previous != ch && previous->isOpen()) {
+    try {
+      connection_->closeChannel(previous);
+    } catch (const std::exception& e) {
+      Logger::debug(std::string(listenerName()) + ": failed closing the replaced channel: " + e.what());
+    }
+  }
   Logger::info(std::string(listenerName()) + ": successfully re-initialized after reconnection");
 }
 
@@ -146,7 +165,7 @@ void BaseListener::watchChannel(const std::shared_ptr<amqp::Channel>& ch) {
       if (self->closing_ || !self->initialized_ || !current || self->channel_ != current) return;
     }
     if (!self->connection_->isReady()) return;  // the reconnection restores it
-    self->scheduleRebuild(reason);
+    self->scheduleRebuild("channel closed on a live connection (" + reason + ")");
   });
 }
 
@@ -162,8 +181,7 @@ void BaseListener::scheduleRebuild(const std::string& reason) {
     failures = rebuildFailures_;
   }
   const int64_t delay = std::min<int64_t>(int64_t{100} << std::min(failures, 9), 30000);
-  Logger::warn(std::string(listenerName()) + ": channel closed on a live connection (" + reason +
-               "); rebuilding it in " + std::to_string(delay) + "ms");
+  Logger::warn(std::string(listenerName()) + ": " + reason + "; rebuilding it in " + std::to_string(delay) + "ms");
   std::weak_ptr<BaseListener> weak = weak_from_this();
   auto connection = connection_;
   connection_->scheduler().schedule(std::chrono::milliseconds(delay), [weak, connection] {
@@ -178,6 +196,12 @@ void BaseListener::rebuild() {
     std::lock_guard<std::mutex> lock(mutex_);
     rebuildScheduled_ = false;
     if (closing_ || !initialized_) return;
+    // Stopped since the broker cancelled the consumer: there is nothing to
+    // put back, and the queue must not be redeclared behind the stop.
+    if (consumerLost_ && !wasStarted_) {
+      consumerLost_ = false;
+      return;
+    }
     ++rebuildFailures_;
   }
   if (!connection_->isReady()) return;
@@ -189,6 +213,20 @@ void BaseListener::rebuild() {
     Logger::error(std::string(listenerName()) + ": failed to rebuild its channel: " + e.what());
     scheduleRebuild(e.what());
   }
+}
+
+// basic.cancel leaves the channel and the connection open, so neither
+// channel-close recovery nor a reconnection would ever notice. The listener
+// forgets the consumer and rebuilds, with the same backoff as a lost channel.
+void BaseListener::onConsumerCancelled(const std::string& tag) {
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    // Not for a consumer since replaced or stopped on purpose.
+    if (closing_ || !initialized_ || !wasStarted_ || consumerTag_ != tag) return;
+    consumerTag_.clear();
+    consumerLost_ = true;
+  }
+  scheduleRebuild("the broker cancelled its consumer");
 }
 
 void BaseListener::startConsuming() {
@@ -210,6 +248,10 @@ void BaseListener::startConsuming() {
   options.exclusive = isAnonymous_;
   options.buildErrorReply = buildErrorReply_;
   options.ordered = orderedDelivery_;
+  std::weak_ptr<BaseListener> weak = weak_from_this();
+  options.onCancelled = [weak, tag] {
+    if (auto self = weak.lock()) self->onConsumerCancelled(tag);
+  };
   connection_->consume(ch, queue, handler, options, lateAck_, getRetryOptions(), processingTimeoutMs_);
   Logger::debug(std::string(listenerName()) + ": started consuming from " + queue);
 }
@@ -255,11 +297,14 @@ void BaseListener::start() {
   {
     std::lock_guard<std::mutex> lock(mutex_);
     if (!initialized_) throw NotInitializedError();
-    if (wasStarted_ && !consumerTag_.empty()) throw AlreadyStartedError();
+    // Recovering from a broker cancellation counts as started: the rebuild
+    // consumes again, and a second consumer here would be a duplicate.
+    if (wasStarted_ && (!consumerTag_.empty() || consumerLost_)) throw AlreadyStartedError();
   }
   if (!connection_->isConnected()) throw NotConnectedError();
   // Restored again from here on: stopConsuming() drops out of restoration.
   attachRestorer();
+  std::lock_guard<std::mutex> serial(restoreMutex_);
   startConsuming();
   std::lock_guard<std::mutex> lock(mutex_);
   wasStarted_ = true;
@@ -275,6 +320,8 @@ void BaseListener::stopConsuming() {
     // shutting down.
     tag = std::move(consumerTag_);
     consumerTag_.clear();
+    // consumerLost_ is left set: a rebuild already scheduled for it sees the
+    // stop and does nothing, rather than redeclaring a deleted queue.
     wasStarted_ = false;
     ch = channel_;
   }

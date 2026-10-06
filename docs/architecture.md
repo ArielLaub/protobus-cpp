@@ -25,7 +25,7 @@ arrives. Where TypeScript has an async generator, C++ has a coroutine
 |---|---|
 | The transport's I/O thread, one per AMQP connection | Everything rabbitmq-c does: reading frames, assembling deliveries, matching confirms to publishes, running commands submitted by other threads. Its callbacks never block |
 | The connection's worker pool | Handlers, settlements (replies, acks, retries, dead letters) and reconnection attempts. Elastic: a task runs on an idle worker or a new one, and idle workers exit |
-| The connection's timer thread | Timeouts: processing, RPC, confirm, stream idle, reconnect backoff. Its callbacks are short and hand real work to the pool |
+| The connection's timer thread | Timeouts: processing, RPC, confirm, stream idle, reconnect backoff. Its callbacks are short and hand real work to the pool, including a timed-out handler's abort listeners, which are application code |
 | The caller's thread | Blocking calls: `init()`, proxy calls, `publishEvent`, `next()` on a stream |
 
 rabbitmq-c is not thread-safe, so one thread owns each connection; other
@@ -46,9 +46,11 @@ seen in sequence; requests are handled in parallel up to the service's
 
 ## Ownership
 
-- A `Context` outlives every service and proxy built on it. Closing it
-  disconnects, then waits up to `SHUTDOWN_DRAIN_TIMEOUT_MS` for handlers still
-  running.
+- A `Context` outlives every service and proxy built on it. Closing it fails
+  the calls and streams still waiting on it, disconnects, then waits up to
+  `SHUTDOWN_DRAIN_TIMEOUT_MS` for handlers still running.
+- A service's `cleanup()` (under `RunnableService`) runs only once no handler
+  is running on its connection; see [Services](services.md).
 - A service is owned by a `std::shared_ptr`. Each delivery takes a reference
   for as long as its handler runs (and a stream, for as long as its
   generator), so releasing a service mid-request destroys it when that request

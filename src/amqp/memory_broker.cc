@@ -862,6 +862,32 @@ void MemoryBroker::setConfirmMode(ConfirmMode mode) {
   impl_->confirmMode = mode;
 }
 
+size_t MemoryBroker::heldConfirms() const {
+  std::lock_guard<std::mutex> lock(impl_->mutex);
+  size_t n = 0;
+  for (const auto& conn : impl_->connections) {
+    for (const auto& ch : conn->channels) n += ch->closed ? 0 : ch->pending.size();
+  }
+  return n;
+}
+
+size_t MemoryBroker::releaseHeldConfirms(amqp::ConfirmOutcome outcome) {
+  std::lock_guard<std::mutex> lock(impl_->mutex);
+  size_t n = 0;
+  for (const auto& conn : impl_->connections) {
+    for (const auto& ch : conn->channels) {
+      if (ch->closed) continue;
+      auto pending = std::move(ch->pending);
+      ch->pending.clear();
+      n += pending.size();
+      impl_->post([pending = std::move(pending), outcome]() mutable {
+        for (auto& p : pending) p.callback(outcome, "");
+      });
+    }
+  }
+  return n;
+}
+
 void MemoryBroker::closeChannelsConsuming(const std::string& queue, const std::string& reason) {
   std::lock_guard<std::mutex> lock(impl_->mutex);
   auto it = impl_->queues.find(queue);

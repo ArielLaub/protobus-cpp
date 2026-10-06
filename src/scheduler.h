@@ -31,6 +31,8 @@ class Scheduler {
   TimerId schedule(std::chrono::milliseconds delay, std::function<void()> fn);
   // True when the timer was removed before it fired.
   bool cancel(TimerId id);
+  // Timers armed and not yet fired or cancelled.
+  size_t pending() const;
 
  private:
   struct State {

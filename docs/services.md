@@ -63,6 +63,19 @@ in-flight work for up to `SHUTDOWN_DRAIN_TIMEOUT_MS`, calls each service's
 then and returns the exit code. If the process is still running
 `SHUTDOWN_EXIT_GRACE_MS` after the shutdown, it is made to exit.
 
+`cleanup()` never runs while a handler of that service's connection is still
+running. When the drain deadline passes with handlers running, the connection
+is closed (their messages go back to the queue) and:
+
+- with the exit on (the default), the shutdown waits up to
+  `SHUTDOWN_EXIT_GRACE_MS` more for them; if they finish, cleanup runs and
+  `wait()` returns as usual, and if they do not, the process exits with the
+  shutdown's code, without cleaning up beneath them and without returning to
+  a `main()` whose teardown would destroy what they still use;
+- with the exit off (`setExitAfterShutdown(false)`), `wait()` returns at once
+  and the cleanup runs when the last of those handlers finishes, so keep the
+  `Context` alive until then.
+
 A `Context` must outlive every service built on it. Closing or destroying it
 disconnects, then waits up to `SHUTDOWN_DRAIN_TIMEOUT_MS` for handlers still
 running.

@@ -184,7 +184,7 @@ TEST_F(ConnectionTest, GivingUpFailsWaitersWithTheReason) {
   o.reconnection.maxDelayMs = 10;
   auto c = newContext(o);
   std::atomic<int> errors{0};
-  c->connection().onError([&](const std::exception&) { ++errors; });
+  const auto listener = c->connection().onError([&](const std::exception&) { ++errors; });
   broker->refuseConnections(true);
   broker->killConnections();
   ASSERT_TRUE(eventually([&] { return !c->connection().isReady(); }));
@@ -195,6 +195,7 @@ TEST_F(ConnectionTest, GivingUpFailsWaitersWithTheReason) {
     EXPECT_NE(std::string(e.what()).find("max reconnection attempts (2) exceeded"), std::string::npos);
   }
   EXPECT_GE(errors.load(), 1);
+  c->connection().removeListener(listener);
   broker->refuseConnections(false);
 }
 

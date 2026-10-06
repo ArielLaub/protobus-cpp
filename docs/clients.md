@@ -28,7 +28,7 @@ thread until the reply arrives, the call fails, or its timeout passes.
 |---|---|---|
 | `actor` | empty | Free-text caller identity, for tracing; the service sees it as `CallContext::actor`. Not authenticated |
 | `rpc` | true | `false` publishes without waiting for a reply: the call returns once the broker has the request |
-| `timeoutMs` | `RPC_CALL_TIMEOUT_MS` | How long to wait for the reply. The deadline starts before the request is published, so it bounds the broker confirm too |
+| `timeoutMs` | `RPC_CALL_TIMEOUT_MS` | How long the call may take. The deadline starts once the connection is ready to publish (see below) and bounds the whole call, the broker confirm as well as the reply |
 | `priority` | unset | 0-255; reorders the request on a priority queue, ignored elsewhere |
 | `messageId` | a UUID | The request's identity (see below) |
 
@@ -40,14 +40,15 @@ older publisher would send it.
 | Exception | Meaning |
 |---|---|
 | `protobus::RemoteError` | The service answered with an error: `what()` is its message, `code()` its code, `method()` the method. See [Errors](errors.md) |
-| `protobus::RpcTimeoutError` | No reply within the timeout. The request may still be processed |
+| `protobus::RpcTimeoutError` | No reply within the timeout, whether or not the broker had confirmed the request (the message says which). The request may still be processed |
 | `protobus::UnroutableError` | No queue is bound to the routing key: no service by that name is running. Definite: nothing was delivered |
 | `protobus::PublishNackedError` | The broker refused the request. Definite |
-| `protobus::PublishConfirmTimeoutError` | No broker confirm in time. **Ambiguous**: the broker may have stored the request |
+| `protobus::PublishConfirmTimeoutError` | No broker confirm within `PUBLISH_CONFIRM_TIMEOUT_MS`, when that comes before the call's own deadline. **Ambiguous**: the broker may have stored the request |
 | `protobus::ChannelClosedError` | The channel closed before the confirm. **Ambiguous** |
-| `protobus::DisconnectedError` | The connection dropped while the call awaited its reply. The request may or may not have been processed |
+| `protobus::DisconnectedError` | The connection dropped, or the context was closed, while the call awaited its reply. The request may or may not have been processed |
+| `protobus::PublishBacklogError` | The channel's confirm bound and the queue behind it were both full, so the request was never sent. Definite |
 | `protobus::NotReadyError` | The connection was closed, gave up reconnecting, or stayed down past `CONNECTION_READY_TIMEOUT_MS`. Nothing was published |
-| `protobus::NotConnectedError` | The context was never connected |
+| `protobus::NotConnectedError` | The context was never connected, or has been closed |
 | `protobus::InvalidRequestError` | The request could not be encoded (a `bigint` wider than 32 bytes, a message of the wrong type) |
 | `protobus::InvalidPriorityError`, `protobus::InvalidMessageIdError` | An option out of range. Nothing was published |
 
@@ -93,6 +94,15 @@ A call made while the connection is being restored waits for it, up to
 replaced and will be there shortly. A call already awaiting its reply when the
 connection drops fails with `DisconnectedError`, because its request may or
 may not have been processed. See [Configuration](configuration.md#reconnection).
+
+The wait for readiness comes before the call's deadline and is bounded
+separately; `timeoutMs` starts once the request can be published. From then
+on the call ends at the first of: its reply; a failed publish, as its
+`PublishError` (an unroutable or refused request is known at once, without
+waiting out the deadline); the deadline, as `RpcTimeoutError`; a disconnect or
+`Context::close()`, as `DisconnectedError`. Waiting for the broker's confirm
+never extends the deadline, and an outcome arriving after the call has ended
+is ignored.
 
 ## The dynamic proxy
 

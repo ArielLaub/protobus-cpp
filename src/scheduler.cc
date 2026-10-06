@@ -49,6 +49,11 @@ bool Scheduler::cancel(TimerId id) {
   return true;
 }
 
+size_t Scheduler::pending() const {
+  std::lock_guard<std::mutex> lock(state_->mutex);
+  return state_->deadlines.size();
+}
+
 void Scheduler::run(std::shared_ptr<State> state) {
   std::unique_lock<std::mutex> lock(state->mutex);
   while (!state->stopping) {

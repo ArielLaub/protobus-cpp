@@ -135,6 +135,103 @@ TEST_F(EventsTest, EventRetryClimbsALadderOfItsOwn) {
   EXPECT_EQ(broker->bindings("svc.Events", "svc.Events.Redelivery"), std::vector<std::string>{"#"});
 }
 
+// x-original-routing-key is publisher-controlled. A retry must go back under
+// the key the broker delivered, never the header's: otherwise a publisher
+// allowed only EVENT.allowed could have this subscriber republish its event
+// to the handler for EVENT.privileged, with the subscriber's permissions.
+TEST_F(EventsTest, AForgedOriginalRoutingKeyCannotRedirectARetry) {
+  protobus::EventRetryOptions retry;
+  retry.maxRetries = 2;
+  retry.retryDelayMs = 20;
+  auto l = listener("forged.Events", retry);
+  std::atomic<int> allowed{0};
+  std::atomic<int> privileged{0};
+  // Distinct typed handlers: the Ping handler on EVENT.allowed fails, and the
+  // Pong handler on EVENT.privileged must never see this event.
+  l->subscribe<pbtest::Ping>(
+      [&](const pbtest::Ping&, const std::string&, const std::string&) {
+        ++allowed;
+        throw std::runtime_error("allowed handler failed");
+      },
+      "EVENT.allowed");
+  l->subscribe<pbtest::Pong>([&](const pbtest::Pong&, const std::string&, const std::string&) { ++privileged; },
+                             "EVENT.privileged");
+  l->start();
+
+  auto ch = ctx->connection().openChannel();
+  protobus::PublishOptions p;
+  protobus::amqp::FieldTable forged;
+  forged["x-original-routing-key"] = protobus::amqp::FieldValue::fromString("EVENT.privileged");
+  p.properties.headers = forged;
+  const std::string body =
+      protobus::wire::encodeEvent({"pbtest.Ping", "EVENT.allowed", ping("forged").SerializeAsString()});
+  ctx->connection().publish(ch, "proto.bus.events", "EVENT.allowed", body, p);
+
+  ASSERT_TRUE(eventually([&] { return broker->queueDepth("forged.Events.DLQ") == 1; }));
+  EXPECT_EQ(allowed.load(), 3);
+  EXPECT_EQ(privileged.load(), 0);
+  auto dead = broker->peek("forged.Events.DLQ").at(0);
+  EXPECT_EQ(dead.routingKey, "forged.Events.DLQ");
+  // The header now records the key the message actually travelled under.
+  EXPECT_EQ(header(dead, "x-original-routing-key"), "EVENT.allowed");
+}
+
+// A Pong delivered on a Ping handler's key fails that handler. Its retries
+// stay on that key: they cannot reach the Pong handler bound elsewhere.
+TEST_F(EventsTest, ARetriedEventOfAnotherTypeStaysOnItsKey) {
+  protobus::EventRetryOptions retry;
+  retry.maxRetries = 1;
+  retry.retryDelayMs = 20;
+  auto l = listener("typed.Events", retry);
+  std::atomic<int> pings{0};
+  std::atomic<int> pongs{0};
+  l->subscribe<pbtest::Ping>([&](const pbtest::Ping&, const std::string&, const std::string&) { ++pings; },
+                             "EVENT.allowed");
+  l->subscribe<pbtest::Pong>([&](const pbtest::Pong&, const std::string&, const std::string&) { ++pongs; },
+                             "EVENT.privileged");
+  l->start();
+  auto ch = ctx->connection().openChannel();
+  protobus::PublishOptions p;
+  protobus::amqp::FieldTable forged;
+  forged["x-original-routing-key"] = protobus::amqp::FieldValue::fromString("EVENT.privileged");
+  p.properties.headers = forged;
+  pbtest::Pong pong;
+  pong.set_id("sneaky");
+  const std::string body = protobus::wire::encodeEvent({"pbtest.Pong", "EVENT.allowed", pong.SerializeAsString()});
+  ctx->connection().publish(ch, "proto.bus.events", "EVENT.allowed", body, p);
+  // The type mismatch is an unhandled failure: retried once, then dead.
+  ASSERT_TRUE(eventually([&] { return broker->queueDepth("typed.Events.DLQ") == 1; }));
+  broker->flush();
+  EXPECT_EQ(pongs.load(), 0);
+  EXPECT_EQ(pings.load(), 0);
+}
+
+// Legitimate retries are unchanged: every hop comes back on the same key and
+// the counter climbs.
+TEST_F(EventsTest, RepeatedRetriesKeepTheirRoutingKey) {
+  protobus::EventRetryOptions retry;
+  retry.maxRetries = 3;
+  retry.retryDelayMs = 10;
+  auto l = listener("hops.Events", retry);
+  std::mutex m;
+  std::vector<std::string> keys;
+  l->subscribe<pbtest::Ping>(
+      [&](const pbtest::Ping&, const std::string&, const std::string& topic) {
+        std::lock_guard<std::mutex> lock(m);
+        keys.push_back(topic);
+        throw std::runtime_error("again");
+      },
+      "EVENT.hops");
+  l->start();
+  ctx->publishEvent(ping("h"), "EVENT.hops");
+  ASSERT_TRUE(eventually([&] { return broker->queueDepth("hops.Events.DLQ") == 1; }));
+  std::lock_guard<std::mutex> lock(m);
+  EXPECT_EQ(keys, std::vector<std::string>(4, "EVENT.hops"));
+  auto dead = broker->peek("hops.Events.DLQ").at(0);
+  EXPECT_EQ(header(dead, "x-retry-count"), "3");
+  EXPECT_EQ(header(dead, "x-original-routing-key"), "EVENT.hops");
+}
+
 TEST_F(EventsTest, AHandledErrorIsNotRetried) {
   protobus::EventRetryOptions retry;
   retry.maxRetries = 2;

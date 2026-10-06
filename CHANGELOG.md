@@ -20,9 +20,15 @@ version follows the protocol generation the other ports share.
 - The custom types `bigint` (with `protobus::Uint256`) and `timestamp`, plus
   user-declared custom types.
 - Publisher confirms on every publish, with ambiguous outcomes reported as
-  such, a bound on unconfirmed publishes, and caller-supplied message ids.
+  such, a bound on publishes the broker has not answered (held through
+  ambiguous timeouts, retiring a channel that stops confirming) and on those
+  queued behind it, mandatory returns matched to the exact publish, and
+  caller-supplied message ids.
+- Unary calls bounded end to end by their deadline, confirm included; closing
+  a context fails its pending calls and streams at once.
 - Reconnection with coordinated restoration of every component; a channel
-  lost on a live connection is rebuilt.
+  lost on a live connection is rebuilt, and a consumer the broker cancels is
+  restored.
 - Priority queues, instance-named services, early acknowledgement, graceful
   shutdown and structured logging.
 - The `protobus-cpp` CLI, the `protoc-gen-protobus-cpp` plugin and

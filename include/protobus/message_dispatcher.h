@@ -29,10 +29,12 @@ class MessageDispatcher : public std::enable_shared_from_this<MessageDispatcher>
   void init();
 
   // Publish a request and, unless options.rpc is false, wait for its reply
-  // and return the raw reply body. A publish that fails throws its
-  // PublishError (the more specific answer) even when the deadline has also
-  // passed; a disconnect while waiting throws DisconnectedError; no reply in
-  // time throws RpcTimeoutError.
+  // and return the raw reply body. The deadline (options.timeoutMs) starts
+  // once the connection is ready to publish and bounds the whole call, the
+  // broker confirm included. Whichever comes first ends it: the reply; a
+  // failed publish, as its PublishError; the deadline, as RpcTimeoutError
+  // (the request may or may not have been delivered); a disconnect, or
+  // close(), as DisconnectedError.
   std::string publish(const std::string& content, const std::string& routingKey, const CallOptions& options = {});
 
   // Publish a request expecting a streaming reply. The request is published
@@ -41,6 +43,9 @@ class MessageDispatcher : public std::enable_shared_from_this<MessageDispatcher>
   ChunkStream publishStreaming(const std::string& content, const std::string& routingKey,
                                const StreamOptions& options = {});
 
+  // Stop: every pending call and stream fails at once with
+  // DisconnectedError, and later calls throw NotConnectedError until init().
+  // Safe to call more than once.
   void close();
 
   // The reply queue's name.
@@ -51,6 +56,8 @@ class MessageDispatcher : public std::enable_shared_from_this<MessageDispatcher>
 
   void onResult(const std::string& content, const std::string& id, const amqp::FieldTable* headers);
   void onDisconnected();
+  void failPending(const std::exception_ptr& error, bool final);
+  std::shared_ptr<PendingCall> takeCall(const std::string& id, const PendingCall* expected = nullptr);
   void publishCancel(const std::string& id);
   void restore();
   void awaitPublishable();
@@ -64,6 +71,7 @@ class MessageDispatcher : public std::enable_shared_from_this<MessageDispatcher>
   mutable std::mutex mutex_;
   std::shared_ptr<amqp::Channel> channel_;
   bool initialized_ = false;
+  bool closed_ = false;
   std::map<std::string, std::shared_ptr<PendingCall>> callbacks_;
   std::function<void()> detachRestorer_;
   std::optional<Connection::ListenerId> disconnectedListener_;

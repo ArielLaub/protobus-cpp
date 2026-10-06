@@ -17,9 +17,11 @@ struct CallOptions {
   // false: publish without waiting for a reply. The call returns once the
   // broker has confirmed the request.
   bool rpc = true;
-  // How long to wait for the reply. Default Config::rpcCallTimeoutMs(). The
-  // deadline starts before the request is published, so it bounds the broker
-  // confirm as well as the reply.
+  // How long the call may take. Default Config::rpcCallTimeoutMs(). The
+  // deadline starts once the connection is ready to publish (a call made
+  // during a reconnection first waits for it, up to
+  // Config::connectionReadyTimeoutMs()) and bounds the broker confirm as well
+  // as the reply.
   std::optional<int64_t> timeoutMs;
   // AMQP message priority, 0-255. Only takes effect on a queue declared with
   // maxPriority; the broker ignores it elsewhere.

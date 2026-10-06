@@ -14,6 +14,13 @@
 // connections close. wait() then returns the exit code. If nothing returns
 // from main within SHUTDOWN_EXIT_GRACE_MS of the shutdown, the process is
 // made to exit, so a stray thread cannot hold it open.
+//
+// cleanup() never runs beneath a running handler. Handlers still running at
+// the drain deadline are given SHUTDOWN_EXIT_GRACE_MS more after the
+// connection closes; if they are still running then, the process exits
+// without cleaning up and without wait() returning. With
+// setExitAfterShutdown(false), wait() returns at once instead, and cleanup()
+// runs when those handlers finish.
 #pragma once
 
 #include <functional>
@@ -33,8 +40,8 @@ class RunnableService : public MessageService {
   // another layout.
   std::string ProtoFileName() const override;
 
-  // Release the service's own resources at shutdown, after in-flight work
-  // has drained. Default: nothing.
+  // Release the service's own resources at shutdown, once no handler on the
+  // service's connection is running. Default: nothing.
   virtual void cleanup() {}
 
   // Construct T(context, options), initialise it, run postInit, and register

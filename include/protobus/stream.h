@@ -4,7 +4,8 @@
 // decodes them. Both block in next() until a chunk arrives, the stream ends
 // (nullopt) or it fails (an exception: the service's error as a RemoteError,
 // or a StreamTimeoutError, StreamBackpressureError, StreamSequenceError or
-// DisconnectedError).
+// DisconnectedError). A failure detected on this side (timeout, backpressure,
+// a lost chunk) also tells the producer to stop, once.
 //
 //   for (const auto& tick : proxy.tick(request)) { ... }
 //

@@ -70,17 +70,24 @@ void shutdown(const std::string& reason, int exitCode) {
   // 2. Let work in hand finish, including the reply, retry or DLQ publish
   //    that settles it.
   const int64_t budget = Config::shutdownDrainTimeoutMs();
+  bool exitAfter;
+  {
+    std::lock_guard<std::mutex> lock(lifecycle().mutex);
+    exitAfter = lifecycle().exitAfterShutdown;
+  }
   std::vector<Context*> contexts;
   for (auto& e : entries) {
     if (std::find(contexts.begin(), contexts.end(), e.context) == contexts.end()) contexts.push_back(e.context);
   }
+  std::vector<Context*> undrained;
   for (auto* ctx : contexts) {
+    bool drained = true;
     try {
       const size_t inFlight = ctx->connection().inFlightDeliveries();
       if (inFlight > 0) {
         Logger::info("Draining " + std::to_string(inFlight) + " in-flight message(s), up to " +
                      std::to_string(budget) + "ms");
-        const bool drained = ctx->connection().drainInFlight(budget);
+        drained = ctx->connection().drainInFlight(budget);
         Logger::info(drained ? std::string("In-flight messages drained")
                              : "Drain deadline reached with " +
                                    std::to_string(ctx->connection().inFlightDeliveries()) +
@@ -88,17 +95,27 @@ void shutdown(const std::string& reason, int exitCode) {
       }
     } catch (const std::exception& err) {
       Logger::error(std::string("Drain failed: ") + err.what());
+      drained = ctx->connection().inFlightDeliveries() == 0;
     }
+    if (!drained) undrained.push_back(ctx);
   }
-
-  // 3. Only now is it safe to release the services' resources.
-  for (auto& e : entries) {
+  auto isUndrained = [&](Context* ctx) {
+    return std::find(undrained.begin(), undrained.end(), ctx) != undrained.end();
+  };
+  auto cleanUp = [](const std::shared_ptr<RunnableService>& service) {
     try {
-      e.service->cleanup();
+      service->cleanup();
       Logger::info("Service cleanup completed");
     } catch (const std::exception& err) {
       Logger::error(std::string("Service cleanup failed: ") + err.what());
     }
+  };
+
+  // 3. Only now is it safe to release the services' resources, and only for
+  //    services with nothing still running: cleanup() must never pull
+  //    resources out from under a handler.
+  for (auto& e : entries) {
+    if (!isUndrained(e.context)) cleanUp(e.service);
   }
   for (auto* ctx : contexts) {
     try {
@@ -109,12 +126,42 @@ void shutdown(const std::string& reason, int exitCode) {
     }
   }
 
-  bool exitAfter;
+  // 4. Handlers still running past the drain. Their services are cleaned up
+  //    once they finish, and not before. With the exit on, that wait is
+  //    bounded by the exit grace: a process whose handlers never return
+  //    leaves without cleaning up beneath them, and without returning to a
+  //    main() whose teardown would destroy what they still use. With the
+  //    exit off, the shutdown completes now and the cleanup follows the
+  //    handlers, whenever they end.
+  for (auto* ctx : undrained) {
+    std::vector<std::shared_ptr<RunnableService>> deferred;
+    for (auto& e : entries) {
+      if (e.context == ctx) deferred.push_back(e.service);
+    }
+    auto connection = ctx->connectionPtr();
+    if (exitAfter) {
+      const int64_t grace = Config::shutdownExitGraceMs();
+      if (!connection->drainInFlight(grace)) {
+        Logger::warn("Handlers still running " + std::to_string(grace) +
+                     "ms after the drain deadline; exiting without cleaning up beneath them");
+        std::_Exit(exitCode);
+      }
+      for (auto& service : deferred) cleanUp(service);
+    } else {
+      Logger::warn("Deferring cleanup of " + std::to_string(deferred.size()) +
+                   " service(s) until their running handlers finish");
+      std::thread([connection, deferred, cleanUp] {
+        while (!connection->drainInFlight(1000)) {
+        }
+        for (auto& service : deferred) cleanUp(service);
+      }).detach();
+    }
+  }
+
   {
     std::lock_guard<std::mutex> lock(lifecycle().mutex);
     lifecycle().done = true;
     lifecycle().exitCode = exitCode;
-    exitAfter = lifecycle().exitAfterShutdown;
     // A process that goes on (one that turned the exit off) may start
     // services again and shut them down again.
     lifecycle().entries.clear();
@@ -122,7 +169,7 @@ void shutdown(const std::string& reason, int exitCode) {
   }
   lifecycle().cv.notify_all();
 
-  // 4. A bounded backstop: the process leaves even if something keeps it
+  // 5. A bounded backstop: the process leaves even if something keeps it
   //    alive past the grace period.
   if (exitAfter) {
     const int64_t grace = Config::shutdownExitGraceMs();

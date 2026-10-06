@@ -55,6 +55,9 @@ PublishConfirmTimeoutError::PublishConfirmTimeoutError(const std::string& messag
 ChannelClosedError::ChannelClosedError(const std::string& message, std::string messageId)
     : PublishError(message, std::move(messageId), "ChannelClosedError", codes::kChannelClosed) {}
 
+PublishBacklogError::PublishBacklogError(const std::string& message, std::string messageId)
+    : PublishError(message, std::move(messageId), "PublishBacklogError", codes::kPublishBacklog) {}
+
 StreamingError::StreamingError(const std::string& message, std::string name) : Error(message, std::move(name)) {}
 
 StreamTimeoutError::StreamTimeoutError(const std::string& message) : StreamingError(message, "StreamTimeoutError") {}
@@ -70,7 +73,7 @@ ReconnectionError::ReconnectionError(const std::string& message) : Error(message
 
 AlreadyConnectedError::AlreadyConnectedError() : Error("already connected", "AlreadyConnectedError") {}
 
-DisconnectedError::DisconnectedError() : Error("Connection lost during RPC call", "DisconnectedError") {}
+DisconnectedError::DisconnectedError(const std::string& message) : Error(message, "DisconnectedError") {}
 
 NotConnectedError::NotConnectedError(const std::string& message) : Error(message, "NotConnectedError") {}
 

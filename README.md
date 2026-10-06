@@ -302,7 +302,7 @@ nothing else at runtime.
   loss modelled. See [Testing](docs/testing.md).
 - **Graceful shutdown.** `RunnableService` stops intake on SIGINT/SIGTERM, lets
   in-flight work finish within `SHUTDOWN_DRAIN_TIMEOUT_MS`, runs your
-  `cleanup()`, then closes.
+  `cleanup()` (never beneath a handler still running), then closes.
 
 ### A short tour
 

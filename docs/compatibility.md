@@ -74,13 +74,18 @@ mixed-replica test declares one service's queues from all four languages.
   failure is the final frame. Cancellation is an empty message on
   `proto.bus.cancel` carrying the stream's correlation id.
 - Retry and dead-letter copies carry `x-retry-count`,
-  `x-original-routing-key`, `x-first-failure-time`, `x-last-error` (the
+  `x-original-routing-key` (written from the delivered routing key, which
+  every port's retry hop preserves; C++ never routes by the header), `x-first-failure-time`, `x-last-error` (the
   error's class and code, never an unhandled error's message), and on the DLQ
   `x-original-queue` and `x-dlq-time`; they keep `contentType`,
   `contentEncoding`, `priority`, `timestamp`, `type` and `appId`, and drop
   `expiration` and `userId`.
 - Readers accept every encoding peers produce: integer headers of any width or
   as text, `x-protobus-final` as a boolean, number or text.
+- A mandatory publish from C++ whose `messageId` is shared with another
+  publish still awaiting its confirm on the same channel (or that has none)
+  also carries `x-protobus-publish-tag`, a per-publish token that tells the
+  broker's return for it apart. Every port ignores or copies unknown headers.
 
 ## Errors
 
@@ -110,5 +115,5 @@ itself, argued otherwise.
 | Processing timeout on streams | covers obtaining the generator | covers obtaining the iterator | applied | not applied |
 | Explicit priority 0 | sent | sent | sent | not sent (equivalent at the broker) |
 | Handlers run | on worker threads, up to the prefetch, in parallel | on the event loop | on the event loop | on goroutines, in parallel |
-| Closing the context | waits for running handlers, up to `SHUTDOWN_DRAIN_TIMEOUT_MS` | closes at once | closes at once | `Close` at once; `Shutdown` drains first |
+| Closing the context | fails pending calls and streams at once, then waits for running handlers, up to `SHUTDOWN_DRAIN_TIMEOUT_MS` | closes at once | closes at once | `Close` at once; `Shutdown` drains first |
 | Logging | `ILogger` / structured `Log`, as TypeScript | `Logger` / `Log` | `logging` | `log/slog` |

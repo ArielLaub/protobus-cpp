@@ -57,9 +57,15 @@ class Config {
   // How long a publish parked on a reconnection waits before failing with
   // NotReadyError. CONNECTION_READY_TIMEOUT_MS, default 30000 ms.
   static int64_t connectionReadyTimeoutMs();
-  // Publishes awaiting a confirm on one channel at a time.
+  // Publishes the broker has not yet answered, on one channel at a time. A
+  // publish whose confirm timed out keeps its place until the broker does
+  // answer (or the channel closes): it may still be stored.
   // MAX_OUTSTANDING_CONFIRMS, default 256.
   static int64_t maxOutstandingConfirms();
+  // Publishes waiting, on one channel, for a place under that bound. One
+  // more fails at once with PublishBacklogError. MAX_PARKED_PUBLISHES,
+  // default 4096.
+  static int64_t maxParkedPublishes();
   // Streaming caller buffer bounds. Crossing one fails the stream with
   // StreamBackpressureError rather than growing without limit.
   static int64_t streamMaxBufferedChunks();      // STREAM_MAX_BUFFERED_CHUNKS, 1024

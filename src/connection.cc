@@ -80,19 +80,52 @@ double jitterFraction() {
 
 // ---- internal state ------------------------------------------------------------
 
+// One confirmed publish, from the request to the transport's answer. The two
+// ends are tracked apart: the caller is answered once (`settled`), at the
+// confirm or at its deadline, while the slot under the outstanding-confirm
+// bound is held until the transport resolves the publish (`resolved`): an
+// ambiguous timeout says nothing about whether the broker still holds it.
+struct PublishOp {
+  std::atomic<bool> settled{false};
+  std::atomic<bool> resolved{false};
+  std::atomic<uint64_t> timer{0};
+  // Guarded by the PublishState's mutex.
+  bool parked = false;
+  bool timedOut = false;
+  uint64_t waiterId = 0;
+};
+
 struct Connection::PublishState {
   std::mutex mutex;
   std::weak_ptr<amqp::Channel> owner;
+  // Publishes started on the channel that the transport has not resolved
+  // yet, whether or not their callers are still waiting: what
+  // MAX_OUTSTANDING_CONFIRMS bounds.
   int64_t inFlight = 0;
+  // Of those, the ones whose callers already timed out.
+  int64_t timedOut = 0;
   bool closed = false;
-  // Publishes parked on the outstanding-confirm bound, each to be started
-  // once a slot frees.
-  std::deque<std::function<void()>> waiters;
+  bool retired = false;
+  uint64_t nextWaiterId = 0;
+  // Publishes parked on the bound, in arrival order, each started once a slot
+  // frees. Bounded by MAX_PARKED_PUBLISHES.
+  struct Waiter {
+    std::shared_ptr<PublishOp> op;
+    std::function<void()> start;
+  };
+  std::map<uint64_t, Waiter> waiters;
 };
 
 struct Connection::DeliveryEntry {
   AbortController controller;
   std::atomic<bool> cancelled{false};
+  // A processing timeout aborts on a worker, never on the timer thread, and
+  // only while the handler is still running: none of the listeners it
+  // registered may START once the connection has seen it return, and that
+  // return waits for one already running. What they may use stays alive
+  // until then through MessageHandlerContext::keepAlive.
+  std::mutex timeoutAbortMutex;
+  bool handlerReturned = false;
 };
 
 struct ConsumerSpec {
@@ -357,8 +390,10 @@ void Connection::scheduleReconnect() {
       const std::string message =
           "max reconnection attempts (" + std::to_string(o.maxRetries) + ") exceeded";
       Logger::error(message);
-      abandonReady(message);
+      // Listeners first: a waiter released by abandonReady() may act on the
+      // failure (or tear down what a listener uses) at once.
       emitError(ReconnectionError(message));
+      abandonReady(message);
       return;
     }
     reconnecting_ = true;
@@ -377,7 +412,14 @@ void Connection::scheduleReconnect() {
       });
     }
   });
-  std::lock_guard<std::mutex> lock(mutex_);
+  // A disconnect() between scheduling and here found no timer to cancel:
+  // cancel it now rather than leave it armed.
+  std::unique_lock<std::mutex> lock(mutex_);
+  if (manualDisconnect_) {
+    lock.unlock();
+    scheduler_->cancel(timer);
+    return;
+  }
   reconnectTimer_ = timer;
 }
 
@@ -451,8 +493,10 @@ void Connection::discardGeneration() {
 void Connection::disconnect() {
   std::shared_ptr<amqp::Connection> h;
   uint64_t timer;
+  bool wasUp;
   {
     std::lock_guard<std::mutex> lock(mutex_);
+    wasUp = !manualDisconnect_ && (connected_ || reconnecting_);
     manualDisconnect_ = true;
     // Invalidate any connect already past its timer.
     ++generation_;
@@ -464,9 +508,15 @@ void Connection::disconnect() {
   if (timer != 0) scheduler_->cancel(timer);
   abandonReady("the connection has been closed");
   if (h) h->close();
-  std::lock_guard<std::mutex> lock(mutex_);
-  connected_ = false;
-  handle_.reset();
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    connected_ = false;
+    handle_.reset();
+  }
+  // Components waiting on the connection (pending calls, streams) hear of a
+  // deliberate close as they would of a lost one; unlike a loss, nothing
+  // reconnects afterwards.
+  if (wasUp) emitDisconnected();
 }
 
 // ---- events --------------------------------------------------------------------
@@ -602,23 +652,24 @@ std::shared_ptr<Connection::PublishState> Connection::publishStateFor(const std:
 
   // A channel closing with publishes parked on the bound must release them,
   // or they wait forever for slots that will never free. Each is started and
-  // fails against the closed channel, settling its own slot. Registered
-  // outside the lock: on a channel that has already closed, the callback runs
-  // at once, on this thread.
+  // fails against the closed channel, unsent. Registered outside the lock: on
+  // a channel that has already closed, the callback runs at once, on this
+  // thread.
   std::weak_ptr<Connection> weak = weak_from_this();
   std::weak_ptr<PublishState> weakState = state;
   const amqp::Channel* key = channel.get();
   channel->onClose([weak, weakState, key](const std::string&) {
     auto st = weakState.lock();
     if (!st) return;
-    std::deque<std::function<void()>> parked;
+    std::map<uint64_t, PublishState::Waiter> parked;
     {
       std::lock_guard<std::mutex> lock(st->mutex);
       st->closed = true;
       parked.swap(st->waiters);
+      for (auto& [_, w] : parked) w.op->parked = false;
       st->inFlight += static_cast<int64_t>(parked.size());
     }
-    for (auto& start : parked) runTrampolined(std::move(start));
+    for (auto& [_, w] : parked) runTrampolined(std::move(w.start));
     if (auto self = weak.lock()) {
       std::lock_guard<std::mutex> lock(self->publishMutex_);
       auto found = self->publishStates_.find(key);
@@ -645,49 +696,49 @@ void Connection::confirmedPublish(const std::shared_ptr<amqp::Channel>& channel,
   const std::string describe = (exchange.empty() ? std::string("(default)") : exchange) + " -> " + routingKey;
   const int64_t confirmTimeout = Config::publishConfirmTimeoutMs();
 
-  struct Op {
-    std::atomic<bool> settled{false};
-    std::atomic<uint64_t> timer{0};
-  };
-  auto op = std::make_shared<Op>();
-  std::weak_ptr<Connection> weak = weak_from_this();
+  auto op = std::make_shared<PublishOp>();
   auto scheduler = scheduler_;
+  auto executor = executor_;
+  const int64_t maxOutstanding = Config::maxOutstandingConfirms();
 
-  auto release = [state] {
+  // The caller's answer, exactly once.
+  auto finish = [op, scheduler, done](std::exception_ptr err) {
+    if (op->settled.exchange(true)) return;
+    if (const uint64_t t = op->timer.load()) scheduler->cancel(t);
+    done(err);
+  };
+
+  // The transport's answer, exactly once: frees the slot and starts the next
+  // parked publish.
+  auto release = [op, state, maxOutstanding] {
+    if (op->resolved.exchange(true)) return;
     std::function<void()> next;
     {
       std::lock_guard<std::mutex> lock(state->mutex);
       --state->inFlight;
-      if (!state->waiters.empty() && state->inFlight < Config::maxOutstandingConfirms()) {
-        next = std::move(state->waiters.front());
-        state->waiters.pop_front();
+      if (op->timedOut) --state->timedOut;
+      if (!state->waiters.empty() && state->inFlight < maxOutstanding) {
+        auto first = state->waiters.begin();
+        first->second.op->parked = false;
+        next = std::move(first->second.start);
+        state->waiters.erase(first);
         ++state->inFlight;
       }
     }
     if (next) runTrampolined(std::move(next));
   };
 
-  auto finish = [op, scheduler, release, done](std::exception_ptr err) {
-    if (op->settled.exchange(true)) return;
-    if (const uint64_t t = op->timer.load()) scheduler->cancel(t);
-    release();
-    done(err);
-  };
-
-  auto executor = executor_;
   auto start = [=]() {
-    // The timer thread must not block: finishing frees a slot, which can
-    // start a parked publish, which waits on the transport.
-    op->timer = scheduler->schedule(std::chrono::milliseconds(confirmTimeout), [finish, describe, confirmTimeout,
-                                                                                 messageId, executor] {
-      executor->post([finish, describe, confirmTimeout, messageId] {
-        finish(std::make_exception_ptr(PublishConfirmTimeoutError(
-            "no broker confirm for " + describe + " within " + std::to_string(confirmTimeout) + "ms", messageId)));
-      });
-    });
+    // Its caller gave up while it waited for a slot: nothing is sent, and the
+    // answer it already has (ambiguous) remains true.
+    if (op->settled.load()) {
+      release();
+      return;
+    }
     try {
       channel->publish(exchange, routingKey, content, options.properties, options.mandatory,
-                       [finish, describe, messageId](amqp::ConfirmOutcome outcome, const std::string& detail) {
+                       [finish, release, describe, messageId](amqp::ConfirmOutcome outcome, const std::string& detail) {
+                         release();
                          switch (outcome) {
                            case amqp::ConfirmOutcome::Ack:
                              finish(nullptr);
@@ -709,21 +760,86 @@ void Connection::confirmedPublish(const std::shared_ptr<amqp::Channel>& channel,
                          }
                        });
     } catch (const std::exception& e) {
+      release();
       finish(std::make_exception_ptr(
           ChannelClosedError(describe + " could not be published: " + std::string(e.what()), messageId)));
     }
   };
 
-  // Bound unconfirmed work before touching the channel at all.
+  // One deadline from the request, parked or not. Parked, the publish was
+  // never sent, which is definite; sent, it is ambiguous, and it keeps its
+  // slot until the transport resolves it. A channel whose every slot is held
+  // that way can make no progress, so it is retired: closing it resolves what
+  // it holds (as ChannelClosedError, to callers long since answered) and its
+  // owner opens another, as for any channel lost on a live connection.
+  std::weak_ptr<PublishState> weakState = state;
+  auto onTimeout = [op, weakState, finish, describe, confirmTimeout, messageId, maxOutstanding] {
+    auto st = weakState.lock();
+    if (!st) return;
+    bool wasParked = false;
+    std::shared_ptr<amqp::Channel> retire;
+    {
+      std::lock_guard<std::mutex> lock(st->mutex);
+      if (op->parked) {
+        st->waiters.erase(op->waiterId);
+        op->parked = false;
+        wasParked = true;
+      } else if (!op->resolved.load() && !op->timedOut) {
+        op->timedOut = true;
+        ++st->timedOut;
+        if (st->timedOut >= maxOutstanding && !st->retired && !st->closed) {
+          st->retired = true;
+          retire = st->owner.lock();
+        }
+      }
+    }
+    if (wasParked) {
+      finish(std::make_exception_ptr(PublishBacklogError(
+          describe + " was not published: no confirm slot freed within " + std::to_string(confirmTimeout) + "ms",
+          messageId)));
+      return;
+    }
+    finish(std::make_exception_ptr(PublishConfirmTimeoutError(
+        "no broker confirm for " + describe + " within " + std::to_string(confirmTimeout) + "ms", messageId)));
+    if (retire) {
+      Logger::warn("retiring a channel: " + std::to_string(maxOutstanding) +
+                   " publish(es) on it went unconfirmed past PUBLISH_CONFIRM_TIMEOUT_MS");
+      try {
+        retire->close();
+      } catch (const std::exception& e) {
+        Logger::debug(std::string("failed closing a retired channel: ") + e.what());
+      }
+    }
+  };
+  // The timer thread must not block: answering a caller can start a parked
+  // publish, which waits on the transport, and retiring closes a channel.
+  op->timer = scheduler->schedule(std::chrono::milliseconds(confirmTimeout), [executor, onTimeout] {
+    executor->post(onTimeout);
+  });
+
+  // Bound unconfirmed work before touching the channel at all, and bound
+  // what waits behind it.
   bool now = false;
+  bool refused = false;
   {
     std::lock_guard<std::mutex> lock(state->mutex);
-    if (state->closed || state->inFlight < Config::maxOutstandingConfirms()) {
+    if (state->closed || state->inFlight < maxOutstanding) {
       ++state->inFlight;
       now = true;
+    } else if (static_cast<int64_t>(state->waiters.size()) >= Config::maxParkedPublishes()) {
+      refused = true;
     } else {
-      state->waiters.push_back(start);
+      op->parked = true;
+      op->waiterId = ++state->nextWaiterId;
+      state->waiters.emplace(op->waiterId, PublishState::Waiter{op, start});
     }
+  }
+  if (refused) {
+    finish(std::make_exception_ptr(PublishBacklogError(
+        describe + " was not published: " + std::to_string(maxOutstanding) + " publish(es) await confirms and " +
+            std::to_string(Config::maxParkedPublishes()) + " more are queued behind them on this channel",
+        messageId)));
+    return;
   }
   if (now) runTrampolined(start);
 }
@@ -881,7 +997,10 @@ void Connection::consume(const std::shared_ptr<amqp::Channel>& channel, const st
           });
         }
       },
-      [queueName] { Logger::warn("consumer for " + queueName + " was cancelled by the broker"); });
+      [queueName, onCancelled = options.onCancelled] {
+        Logger::warn("consumer for " + queueName + " was cancelled by the broker");
+        if (onCancelled) onCancelled();
+      });
 }
 
 void Connection::handleDelivery(std::shared_ptr<Delivery> d) {
@@ -893,10 +1012,14 @@ void Connection::handleDelivery(std::shared_ptr<Delivery> d) {
   if (auto it = d->headers.find("x-retry-count"); it != d->headers.end()) {
     d->retryCount = it->second.asInt().value_or(0);
   }
+  // The key the broker delivered on, never the x-original-routing-key header:
+  // the header is whatever the publisher wrote, and routing the retry by it
+  // would let a publisher send its message, under this consumer's
+  // permissions, to a key it was never allowed to publish to. No legitimate
+  // path needs the header: every port's retry and redelivery hops preserve
+  // the routing key, so a retried message arrives under its original key.
+  // The header stays informational, rewritten from the delivery on each hop.
   d->originalRoutingKey = d->msg.routingKey;
-  if (auto it = d->headers.find("x-original-routing-key"); it != d->headers.end()) {
-    if (auto s = it->second.asString(); s && !s->empty()) d->originalRoutingKey = *s;
-  }
 
   Logger::debug("incoming message: " + d->msg.exchange + " " + d->msg.routingKey +
                 (d->retryCount > 0 ? " (retry " + std::to_string(d->retryCount) + ")" : ""));
@@ -922,7 +1045,16 @@ void Connection::handleDelivery(std::shared_ptr<Delivery> d) {
     // Only a timer that wins the race aborts: a handler that returned first
     // (a stream about to be published, say) must keep its signal.
     if (d->settled.exchange(true)) return;
-    d->entry->controller.abort();
+    // This thread fires every timer in the process, so the handler's abort
+    // listeners (application code) do not run on it, and the settlement does
+    // not wait for them: a listener that blocks holds up neither other
+    // timers nor the caller's PROCESSING_TIMEOUT answer. The signal fires
+    // first, so a handler waiting on it wakes as the listeners start.
+    auto entry = d->entry;
+    self->executor_->post([entry] {
+      std::lock_guard<std::mutex> lock(entry->timeoutAbortMutex);
+      if (!entry->handlerReturned) entry->controller.abort();
+    });
     self->executor_->post([self, d, limit] {
       self->settleError(d, std::make_exception_ptr(TimeoutError(
                                "message " + d->correlationId + " exceeded the " + std::to_string(limit) +
@@ -933,17 +1065,24 @@ void Connection::handleDelivery(std::shared_ptr<Delivery> d) {
   handlerStarted();
   MessageHandlerResult result;
   std::exception_ptr error;
+  MessageHandlerContext context;
+  context.signal = d->entry->controller.signal();
+  context.routingKey = d->msg.routingKey;
+  context.messageId = props.messageId.value_or("");
+  context.redelivered = d->msg.redelivered;
+  context.headers = &d->headers;
   try {
-    MessageHandlerContext context;
-    context.signal = d->entry->controller.signal();
-    context.routingKey = d->msg.routingKey;
-    context.messageId = props.messageId.value_or("");
-    context.redelivered = d->msg.redelivered;
-    context.headers = &d->headers;
     result = spec.handler(d->msg.body, d->correlationId, context);
   } catch (...) {
     error = std::current_exception();
   }
+  {
+    // Waits out a timeout abort whose listeners are running, and stops one
+    // that has not started yet. Only then is what they may use released.
+    std::lock_guard<std::mutex> lock(d->entry->timeoutAbortMutex);
+    d->entry->handlerReturned = true;
+  }
+  context.keepAlive.reset();
   handlerFinished();
 
   if (d->settled.exchange(true)) {

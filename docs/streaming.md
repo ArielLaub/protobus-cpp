@@ -131,9 +131,15 @@ surfaces from the first `next()`.
 |---|---|
 | `RemoteError` | The service's error, after the chunks it sent |
 | `StreamTimeoutError` | No chunk within the idle timeout. The producer is told to stop |
-| `StreamBackpressureError` | The caller fell behind: more than `STREAM_MAX_BUFFERED_CHUNKS` chunks or `STREAM_MAX_BUFFERED_BYTES` bytes waiting for this call, or `STREAM_MAX_TOTAL_BUFFERED_BYTES` across all of the process's calls |
-| `StreamSequenceError` | A chunk was lost (the sequence numbers have a gap). The stream fails rather than look complete |
-| `DisconnectedError` | The connection dropped mid-stream |
+| `StreamBackpressureError` | The caller fell behind: more than `STREAM_MAX_BUFFERED_CHUNKS` chunks or `STREAM_MAX_BUFFERED_BYTES` bytes waiting for this call, or `STREAM_MAX_TOTAL_BUFFERED_BYTES` across all of the process's calls. The producer is told to stop |
+| `StreamSequenceError` | A chunk was lost (the sequence numbers have a gap). The stream fails rather than look complete, and the producer is told to stop |
+| `DisconnectedError` | The connection dropped mid-stream, or the context was closed |
+
+Every failure the caller's side detects (idle timeout, backpressure, a lost
+chunk) is raised from the moment it happens, whether or not the caller is
+iterating, and sends the producer one cancellation notice; chunks still
+arriving for the call are dropped. Cancelling or destroying the stream
+afterwards sends nothing more.
 
 ## On the wire
 

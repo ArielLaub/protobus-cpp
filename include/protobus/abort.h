@@ -26,8 +26,9 @@ class AbortSignal {
   bool aborted() const;
 
   // Run `fn` once when the signal fires; at once if it already has. Returns
-  // an id for removeListener. `fn` runs on whichever thread aborts, so keep
-  // it short.
+  // an id for removeListener. `fn` runs on whichever thread aborts (for a
+  // handler's processing timeout or a cancelled stream, one of the
+  // connection's workers), so keep it short.
   uint64_t addListener(std::function<void()> fn) const;
   void removeListener(uint64_t id) const;
 

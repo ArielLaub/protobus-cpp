@@ -134,7 +134,10 @@ class VHost {
  public:
   VHost(const Management& mgmt, std::string amqpUrlBase, std::string name, std::string user)
       : mgmt_(mgmt), amqpBase_(std::move(amqpUrlBase)), name_(std::move(name)), user_(std::move(user)) {}
-  ~VHost() { mgmt_.request("DELETE", "/api/vhosts/" + urlEncode(name_)); }
+  ~VHost() {
+    mgmt_.request("DELETE", "/api/vhosts/" + urlEncode(name_));
+    for (const auto& u : users_) mgmt_.request("DELETE", "/api/users/" + urlEncode(u));
+  }
 
   std::string url() const { return amqpBase_ + urlEncode(name_); }
   const std::string& name() const { return name_; }
@@ -175,6 +178,40 @@ class VHost {
     }
   }
 
+  // Delete a queue from the broker's side, as an operator would.
+  bool deleteQueue(const std::string& queue) const {
+    return mgmt_.request("DELETE", "/api/queues/" + urlEncode(name_) + "/" + urlEncode(queue)).status < 300;
+  }
+
+  // A user of this vhost with the given permissions (regular expressions),
+  // and optionally a topic permission restricting what it may publish to
+  // `topicExchange`. Returns the AMQP URL that logs in as it. The user is
+  // deleted with the vhost's other test state by the caller.
+  std::string createUser(const std::string& user, const std::string& password, const std::string& configure,
+                         const std::string& write, const std::string& read, const std::string& topicExchange = "",
+                         const std::string& topicWrite = "") const {
+    auto r = mgmt_.request("PUT", "/api/users/" + urlEncode(user),
+                           "{\"password\":\"" + password + "\",\"tags\":\"\"}");
+    if (r.status >= 300) throw std::runtime_error("cannot create user: HTTP " + std::to_string(r.status));
+    r = mgmt_.request("PUT", "/api/permissions/" + urlEncode(name_) + "/" + urlEncode(user),
+                      "{\"configure\":\"" + configure + "\",\"write\":\"" + write + "\",\"read\":\"" + read +
+                          "\"}");
+    if (r.status >= 300) throw std::runtime_error("cannot grant permissions: HTTP " + std::to_string(r.status));
+    if (!topicExchange.empty()) {
+      r = mgmt_.request("PUT", "/api/topic-permissions/" + urlEncode(name_) + "/" + urlEncode(user),
+                        "{\"exchange\":\"" + topicExchange + "\",\"write\":\"" + topicWrite +
+                            "\",\"read\":\".*\"}");
+      if (r.status >= 300) throw std::runtime_error("cannot set topic permissions: HTTP " + std::to_string(r.status));
+    }
+    users_.push_back(user);
+    // amqp://guest:guest@host:port/ -> amqp://user:password@host:port/<vhost>
+    static const std::regex re(R"(^(amqps?://)[^@/]+@(.*)$)");
+    std::smatch m;
+    const std::string base = amqpBase_;
+    if (!std::regex_match(base, m, re)) throw std::runtime_error("unexpected AMQP URL");
+    return m[1].str() + user + ":" + password + "@" + m[2].str() + urlEncode(name_);
+  }
+
   bool queueExists(const std::string& queue) const {
     return mgmt_.request("GET", "/api/queues/" + urlEncode(name_) + "/" + urlEncode(queue)).status == 200;
   }
@@ -184,6 +221,7 @@ class VHost {
   std::string amqpBase_;
   std::string name_;
   std::string user_;
+  mutable std::vector<std::string> users_;
 };
 
 class Broker {

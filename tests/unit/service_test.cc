@@ -101,6 +101,35 @@ TEST_F(ServiceTest, UnhandledErrorClimbsTheRetryLadderIntoTheDlq) {
   EXPECT_FALSE(dead.properties.replyTo);
 }
 
+// The request ladder has the same guard: a forged x-original-routing-key
+// cannot send the retry to a queue the publisher could not address.
+TEST_F(ServiceTest, AForgedOriginalRoutingKeyCannotRedirectARequestRetry) {
+  protobus::MessageServiceOptions o;
+  o.retry.maxRetries = 1;
+  o.retry.retryDelayMs = 20;
+  auto svc = serve(o);
+  auto ch = ctx->connection().openChannel();
+  protobus::QueueOptions q;
+  ctx->connection().declareQueue(ch, "victim", q);
+  ctx->connection().bindQueue(ch, "victim", "proto.bus", "REQUEST.victim.#");
+
+  pbtest::FailRequest f;
+  f.set_id("forged");
+  protobus::PublishOptions p;
+  protobus::amqp::FieldTable forged;
+  forged["x-original-routing-key"] = protobus::amqp::FieldValue::fromString("REQUEST.victim.steal");
+  p.properties.headers = forged;
+  p.properties.correlationId = "c-forged";
+  const std::string body = protobus::wire::encodeRequest({"pbtest.Calc.fail", "", f.SerializeAsString()});
+  ctx->connection().publish(ch, "proto.bus", "REQUEST.pbtest.Calc.fail", body, p);
+
+  ASSERT_TRUE(eventually([&] { return broker->queueDepth("pbtest.Calc.DLQ") == 1; }));
+  EXPECT_EQ(svc->failAttempts.load(), 2);
+  EXPECT_EQ(broker->queueDepth("victim"), 0u);
+  auto dead = broker->peek("pbtest.Calc.DLQ").at(0);
+  EXPECT_EQ(header(dead, "x-original-routing-key"), "REQUEST.pbtest.Calc.fail");
+}
+
 TEST_F(ServiceTest, WithoutRetriesTheCallerIsAnsweredAndTheMessageRejected) {
   protobus::MessageServiceOptions o;
   o.retry.maxRetries = 0;

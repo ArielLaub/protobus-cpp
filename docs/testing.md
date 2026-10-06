@@ -34,6 +34,7 @@ It also injects faults and exposes its state:
 | `killConnections()` | Drop every connection as a lost socket would: unacknowledged deliveries are requeued, and the context reconnects |
 | `refuseConnections(bool)` | Make reconnection attempts fail |
 | `setConfirmMode(Nack \| Drop)` | Refuse publishes, or never confirm them |
+| `heldConfirms()`, `releaseHeldConfirms(outcome)` | Count the confirms `Drop` is holding, or deliver them late |
 | `closeChannelsConsuming(queue)` | Close a consumer's channel on a live connection |
 | `queueDepth`, `peek`, `unackedCount`, `consumerCount`, `queueArguments`, `bindings` | Inspect queues |
 | `flush()` | Wait for every callback queued so far |

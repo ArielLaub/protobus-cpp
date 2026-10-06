@@ -119,6 +119,8 @@ int64_t Config::maxOutstandingConfirms() {
   return std::min<int64_t>(detail::envInt("MAX_OUTSTANDING_CONFIRMS", 256), 65535);
 }
 
+int64_t Config::maxParkedPublishes() { return detail::envInt("MAX_PARKED_PUBLISHES", 4096); }
+
 int64_t Config::streamMaxBufferedChunks() { return detail::envInt("STREAM_MAX_BUFFERED_CHUNKS", 1024); }
 
 int64_t Config::streamMaxBufferedBytes() { return detail::envInt("STREAM_MAX_BUFFERED_BYTES", 64LL * 1024 * 1024); }

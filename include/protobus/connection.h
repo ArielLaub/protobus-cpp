@@ -62,6 +62,10 @@ struct MessageHandlerContext {
   // The broker has delivered this message before.
   bool redelivered = false;
   const amqp::FieldTable* headers = nullptr;
+  // What the handler's abort listeners may refer to. The connection holds it
+  // until the handler has returned AND any listener its processing timeout
+  // started has finished. MessageService sets it to the service.
+  std::shared_ptr<void> keepAlive;
 };
 
 // What a handler returns: nothing (no reply), one encoded reply, or a stream
@@ -100,6 +104,10 @@ struct ConsumeOptions {
   // processing timeout. Returning nullopt leaves the caller to its own
   // timeout.
   std::function<std::optional<std::string>(const std::string& content, const std::exception& error)> buildErrorReply;
+  // Called when the broker cancels the consumer (basic.cancel: its queue was
+  // deleted, say), which leaves the channel and connection open. Runs on the
+  // transport's thread: must not block.
+  std::function<void()> onCancelled;
 };
 
 struct ConsumeRetryOptions {
@@ -153,7 +161,8 @@ class Connection : public std::enable_shared_from_this<Connection> {
   // Connect. Throws AlreadyConnectedError when connected, and the transport's
   // error when the broker cannot be reached.
   void connect(const std::string& url, ReconnectionOptions options = {});
-  // Close deliberately. Waiters on readiness fail with NotReadyError.
+  // Close deliberately. Waiters on readiness fail with NotReadyError, and the
+  // onDisconnected listeners run, so pending calls and streams fail at once.
   void disconnect();
 
   // Register topology this connection must put back before it reports itself
@@ -183,7 +192,9 @@ class Connection : public std::enable_shared_from_this<Connection> {
   using ListenerId = uint64_t;
   ListenerId onReconnecting(std::function<void(int attempt, int64_t delayMs)> fn);
   ListenerId onReconnected(std::function<void()> fn);
-  // Runs on the transport's thread: must not block.
+  // The connection went down: lost (a reconnection is scheduled next) or
+  // closed by disconnect() (nothing follows). Runs on the
+  // transport's thread, or on disconnect()'s caller: must not block.
   ListenerId onDisconnected(std::function<void()> fn);
   ListenerId onError(std::function<void(const std::exception&)> fn);
   void removeListener(ListenerId id);

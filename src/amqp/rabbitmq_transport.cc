@@ -34,9 +34,8 @@
 #include <mutex>
 #include <set>
 #include <thread>
-#include <unordered_map>
-#include <unordered_set>
 
+#include "amqp/confirm_tracker.h"
 #include "amqp/url.h"
 #include "protobus/logger.h"
 #include "protobus/transport.h"
@@ -325,11 +324,6 @@ amqp_basic_properties_t toAmqpProperties(const Properties& p, TableBuilder& tabl
 
 // ---- connection ----------------------------------------------------------------
 
-struct PendingConfirm {
-  ConfirmCallback callback;
-  std::string messageId;
-};
-
 struct Consumer {
   DeliveryCallback onDelivery;
   std::function<void()> onCancel;
@@ -344,12 +338,8 @@ struct ChannelState {
   std::atomic<bool> closed{false};
   std::string closeReason;
   uint64_t nextSeq = 1;
-  std::map<uint64_t, PendingConfirm> pending;
-  // messageIds with a publish awaiting its confirm, and those of them the
-  // broker returned. RabbitMQ sends basic.return before the confirm for the
-  // same message, so the confirm can consult the set.
-  std::unordered_multiset<std::string> awaiting;
-  std::unordered_set<std::string> returned;
+  // Unconfirmed publishes, and the returns marking them.
+  detail::ConfirmTracker confirms;
   std::map<std::string, Consumer> consumers;
   // No-ack consumers cancelled on this channel: a delivery for one still in
   // flight is dropped, never rejected (an unknown tag closes the channel).
@@ -593,13 +583,9 @@ class RabbitConnection : public Connection, public std::enable_shared_from_this<
   }
 
   void failChannel(ChannelState& st, const std::string& reason) {
-    auto pending = std::move(st.pending);
-    st.pending.clear();
-    st.awaiting.clear();
-    st.returned.clear();
-    for (auto& [_, p] : pending) {
+    for (auto& callback : st.confirms.takeAll()) {
       try {
-        p.callback(ConfirmOutcome::Closed, reason);
+        callback(ConfirmOutcome::Closed, reason);
       } catch (...) {
       }
     }
@@ -822,11 +808,9 @@ class RabbitConnection : public Connection, public std::enable_shared_from_this<
     Delivery d = std::move(st.partial);
     st.partial = Delivery{};
     if (kind == ChannelState::Assembly::Return) {
-      // Only while a publish is actually waiting on that id: a return
-      // arriving after its publish gave up would otherwise be read as the
-      // verdict on the next publish reusing the id.
-      if (d.properties.messageId && st.awaiting.count(*d.properties.messageId) > 0) {
-        st.returned.insert(*d.properties.messageId);
+      if (!st.confirms.onReturn(d.properties)) {
+        Logger::debug("protobus: a returned message matched no outstanding publish on channel " +
+                      std::to_string(st.id));
       }
       return;
     }
@@ -846,27 +830,9 @@ class RabbitConnection : public Connection, public std::enable_shared_from_this<
   }
 
   void settle(ChannelState& st, uint64_t tag, bool multiple, bool nacked) {
-    std::vector<PendingConfirm> done;
-    auto end = multiple ? st.pending.upper_bound(tag) : st.pending.find(tag);
-    if (multiple) {
-      for (auto it = st.pending.begin(); it != end;) {
-        done.push_back(std::move(it->second));
-        it = st.pending.erase(it);
-      }
-    } else if (end != st.pending.end()) {
-      done.push_back(std::move(end->second));
-      st.pending.erase(end);
-    }
-    for (auto& p : done) {
-      ConfirmOutcome outcome = nacked ? ConfirmOutcome::Nack : ConfirmOutcome::Ack;
-      if (!p.messageId.empty()) {
-        if (!nacked && st.returned.count(p.messageId) > 0) outcome = ConfirmOutcome::Returned;
-        auto a = st.awaiting.find(p.messageId);
-        if (a != st.awaiting.end()) st.awaiting.erase(a);
-        if (st.awaiting.count(p.messageId) == 0) st.returned.erase(p.messageId);
-      }
+    for (auto& done : st.confirms.settle(tag, multiple, nacked)) {
       try {
-        p.callback(outcome, nacked ? "message nacked by the broker" : "");
+        done.callback(done.outcome, nacked ? "message nacked by the broker" : "");
       } catch (...) {
       }
     }
@@ -1060,17 +1026,15 @@ void RabbitChannel::publish(const std::string& exchange, const std::string& rout
   auto task = [conn, st, exchange, routingKey, body, properties, mandatory,
                onConfirm = std::move(onConfirm)]() mutable {
     if (st->closed) throw AmqpError("channel is closed: " + st->closeReason, 0, true);
+    auto prepared = st->confirms.prepare(properties, mandatory);
     TableBuilder tables;
-    amqp_basic_properties_t props = toAmqpProperties(properties, tables);
+    amqp_basic_properties_t props = toAmqpProperties(prepared.properties, tables);
     const int status = amqp_basic_publish(conn->state(), st->id, stringBytes(exchange), stringBytes(routingKey),
                                           mandatory ? 1 : 0, 0, &props, stringBytes(body));
     if (status != AMQP_STATUS_OK) {
       throw AmqpError(std::string("publish failed: ") + amqp_error_string2(status), 0, true);
     }
-    const uint64_t seq = st->nextSeq++;
-    const std::string id = properties.messageId.value_or("");
-    if (!id.empty()) st->awaiting.insert(id);
-    st->pending.emplace(seq, PendingConfirm{std::move(onConfirm), id});
+    st->confirms.track(st->nextSeq++, std::move(prepared), std::move(onConfirm));
     return 0;
   };
   conn_->run(std::move(task));

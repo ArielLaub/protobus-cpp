@@ -209,8 +209,10 @@ void MessageService::init() {
                MessageHandlerContext& context) -> MessageHandlerResult {
           auto self = weak.lock();
           if (!self) throw NotInitializedError("the service has been destroyed");
-          // A stream runs after this returns, so onMessage hands it a
-          // reference of its own.
+          // Kept until the handler's abort listeners are done too. A stream
+          // runs after this returns, so onMessage hands it a reference of its
+          // own.
+          context.keepAlive = self;
           return self->onMessage(data, correlationId, context);
         },
         ServiceName());

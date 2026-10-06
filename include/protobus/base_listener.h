@@ -95,6 +95,7 @@ class BaseListener : public std::enable_shared_from_this<BaseListener> {
   void watchChannel(const std::shared_ptr<amqp::Channel>& channel);
   void scheduleRebuild(const std::string& reason);
   void rebuild();
+  void onConsumerCancelled(const std::string& tag);
 
   mutable std::mutex mutex_;
   std::shared_ptr<amqp::Channel> channel_;
@@ -108,6 +109,11 @@ class BaseListener : public std::enable_shared_from_this<BaseListener> {
   bool closing_ = false;
   bool rebuildScheduled_ = false;
   int rebuildFailures_ = 0;
+  // The broker cancelled the consumer; a rebuild is putting it back.
+  bool consumerLost_ = false;
+  // One restoration at a time, whoever runs it (the reconnection, a rebuild):
+  // two at once would leave two consumers.
+  std::mutex restoreMutex_;
   std::vector<std::string> bindings_;
   std::function<void()> detachRestorer_;
   std::optional<Connection::ListenerId> disconnectedListener_;
