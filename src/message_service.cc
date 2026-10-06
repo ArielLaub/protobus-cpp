@@ -5,6 +5,7 @@
 
 #include "protobus/config.h"
 #include "protobus/logger.h"
+#include "threading.h"
 
 namespace protobus {
 
@@ -27,10 +28,20 @@ namespace {
 // iteration raises it. `service` keeps the service alive while the stream
 // runs.
 Generator<std::string> streamResponses(std::string method, Generator<std::string> inner, std::string correlationId,
-                                       std::shared_ptr<void> service) {
+                                       std::shared_ptr<void> service, std::shared_ptr<detail::HandlerTurn> turn) {
   std::optional<std::string> failure;
   try {
-    while (auto chunk = inner.next()) co_yield MessageFactory::buildResultResponse(method, *chunk);
+    for (;;) {
+      std::optional<std::string> chunk;
+      {
+        // A serialized service's turn covers each step of its generator (the
+        // handler's code between two yields), never the publishing between.
+        detail::TurnScope serial(turn.get());
+        chunk = inner.next();
+      }
+      if (!chunk) break;
+      co_yield MessageFactory::buildResultResponse(method, *chunk);
+    }
   } catch (const std::exception& e) {
     Logger::error(e.what());
     // The stream's terminal error is published to the caller, so it gets the
@@ -213,9 +224,14 @@ void MessageService::init() {
           // runs after this returns, so onMessage hands it a reference of its
           // own.
           context.keepAlive = self;
+          detail::TurnScope serial(self->turn_.get());
           return self->onMessage(data, correlationId, context);
         },
         ServiceName());
+    if (options_.serializeHandlers) {
+      turn_ = std::make_shared<detail::HandlerTurn>(ServiceName());
+      eventListener_->serializeWith(turn_);
+    }
     eventListener_->init(nullptr, ServiceName() + ".Events");
     listener_->subscribe("REQUEST." + ServiceName() + ".*");
     listener_->start();
@@ -422,7 +438,7 @@ MessageHandlerResult MessageService::onMessage(const std::string& data, const st
       // HandledError) is answered as the unary path answers one.
       return handleUnaryError(envelope.method, std::current_exception(), correlationId);
     }
-    return streamResponses(envelope.method, std::move(chunks), correlationId, shared_from_this());
+    return streamResponses(envelope.method, std::move(chunks), correlationId, shared_from_this(), turn_);
   }
 
   if (entry.streaming) {

@@ -31,6 +31,11 @@ version follows the protocol generation the other ports share.
   restored.
 - Priority queues, instance-named services, early acknowledgement, graceful
   shutdown and structured logging.
+- Thread-safety guard rails: opt-in serialized handlers
+  (`MessageServiceOptions::serializeHandlers`), blocking calls refused with
+  `std::logic_error` on threads that must not block, and a `Context`
+  destroyed under running handlers reported (and aborted on, in debug
+  builds). See docs/threading.md.
 - The `protobus-cpp` CLI, the `protoc-gen-protobus-cpp` plugin and
   `protobus_generate()` for CMake.
 - `protobus::testing::MemoryBroker`, an in-memory broker for tests.

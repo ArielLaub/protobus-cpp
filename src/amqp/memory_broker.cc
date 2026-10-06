@@ -10,6 +10,7 @@
 #include <set>
 #include <thread>
 
+#include "threading.h"
 #include "uuid.h"
 
 namespace protobus::testing {
@@ -264,6 +265,7 @@ struct MemoryBroker::Impl : std::enable_shared_from_this<MemoryBroker::Impl> {
 
   void dispatchLoop() {
     dispatcherId = std::this_thread::get_id();
+    protobus::detail::markNonBlockingThread("the memory broker's callback thread, which stands in for a transport thread");
     std::unique_lock<std::mutex> lock(dispatchMutex);
     for (;;) {
       dispatchCv.wait(lock, [&] { return stopping || !callbacks.empty(); });

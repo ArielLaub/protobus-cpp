@@ -114,6 +114,6 @@ itself, argued otherwise.
 | Streaming call | request published at call time; failures surface at the first `next()` | starts at call time | starts at iteration | starts when ranged over |
 | Processing timeout on streams | covers obtaining the generator | covers obtaining the iterator | applied | not applied |
 | Explicit priority 0 | sent | sent | sent | not sent (equivalent at the broker) |
-| Handlers run | on worker threads, up to the prefetch, in parallel | on the event loop | on the event loop | on goroutines, in parallel |
+| Handlers run | on worker threads, up to the prefetch, in parallel (or one at a time with `serializeHandlers`) | on the event loop | on the event loop | on goroutines, in parallel |
 | Closing the context | fails pending calls and streams at once, then waits for running handlers, up to `SHUTDOWN_DRAIN_TIMEOUT_MS` | closes at once | closes at once | `Close` at once; `Shutdown` drains first |
 | Logging | `ILogger` / structured `Log`, as TypeScript | `Logger` / `Log` | `logging` | `log/slog` |

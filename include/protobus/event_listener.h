@@ -26,6 +26,10 @@
 
 namespace protobus {
 
+namespace detail {
+struct HandlerTurn;
+}
+
 class MessageFactory;
 
 // (event, type, topic): the decoded event, its full type name, and the topic
@@ -78,6 +82,10 @@ class EventListener : public BaseListener {
   // Receive every event the queue gets, before the routed handlers.
   void subscribeAll(EventHandler handler);
 
+  // Run every handler while holding `turn`, so they never overlap with the
+  // other handlers sharing it (MessageServiceOptions::serializeHandlers).
+  void serializeWith(std::shared_ptr<detail::HandlerTurn> turn);
+
   // The names of the retry objects; nullopt when retry is off.
   std::optional<EventRetryTopology> retryTopology() const;
 
@@ -105,6 +113,7 @@ class EventListener : public BaseListener {
   mutable std::mutex routerMutex_;
   Trie<std::shared_ptr<RawHandler>> router_;
   EventHandler allHandler_;
+  std::shared_ptr<detail::HandlerTurn> turn_;
   std::string retryQueueName_;
   std::string retryExchangeName_;
   std::string redeliveryExchangeName_;

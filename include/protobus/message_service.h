@@ -45,6 +45,10 @@
 
 namespace protobus {
 
+namespace detail {
+struct HandlerTurn;
+}
+
 struct MessageServiceOptions {
   // Deliveries handled in parallel by this process: the queue's prefetch.
   // Default 1.
@@ -61,6 +65,13 @@ struct MessageServiceOptions {
   std::optional<int> maxPriority;
   // Retry for this service's EVENT subscriptions; off by default.
   EventRetryOptions eventRetry;
+  // Run this service's handlers one at a time: requests, each step of a
+  // stream, and events never overlap, so the service's own state needs no
+  // locking. Off by default (handlers run in parallel on worker threads).
+  // Time spent waiting for the turn counts against processingTimeoutMs, and a
+  // handler that calls its own service and waits for the reply throws
+  // std::logic_error instead of deadlocking. See docs/threading.md.
+  bool serializeHandlers = false;
 };
 
 // What a handler receives besides its request.
@@ -196,6 +207,8 @@ class MessageService : public std::enable_shared_from_this<MessageService> {
   std::shared_ptr<MessageListener> listener_;
   std::shared_ptr<EventListener> eventListener_;
   std::shared_ptr<CancelListener> cancelListener_;
+  // Held by every handler when options_.serializeHandlers is on.
+  std::shared_ptr<detail::HandlerTurn> turn_;
 
   mutable std::mutex mutex_;
   std::map<std::string, MethodEntry> methods_;

@@ -104,6 +104,7 @@ add_library(protobus
   src/runnable_service.cc
   src/service_proxy.cc
   src/scheduler.cc
+  src/threading.cc
   src/uuid.cc
   src/amqp/memory_broker.cc
   src/amqp/rabbitmq_transport.cc

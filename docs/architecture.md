@@ -28,6 +28,11 @@ arrives. Where TypeScript has an async generator, C++ has a coroutine
 | The connection's timer thread | Timeouts: processing, RPC, confirm, stream idle, reconnect backoff. Its callbacks are short and hand real work to the pool, including a timed-out handler's abort listeners, which are application code |
 | The caller's thread | Blocking calls: `init()`, proxy calls, `publishEvent`, `next()` on a stream |
 
+The I/O and timer threads are marked: a blocking protobus call made on one
+throws `std::logic_error` instead of hanging. See
+[Threading and lifetimes](threading.md) for the rules this implies for
+application code.
+
 rabbitmq-c is not thread-safe, so one thread owns each connection; other
 threads submit commands to it through a queue and a wake pipe. A command that
 waits for a broker reply (declare, bind, consume) blocks its submitting

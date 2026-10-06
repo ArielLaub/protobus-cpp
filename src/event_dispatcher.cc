@@ -4,6 +4,7 @@
 #include "protobus/errors.h"
 #include "protobus/logger.h"
 #include "protobus/message_factory.h"
+#include "threading.h"
 #include "uuid.h"
 
 namespace protobus {
@@ -93,6 +94,7 @@ std::shared_ptr<amqp::Channel> EventDispatcher::publishChannel() {
 
 void EventDispatcher::publish(const std::string& type, const google::protobuf::Message& content,
                               const std::string& topic) {
+  detail::requireMayBlock("publishEvent");
   // A reconnection is waited through; anything else with no connection is
   // reported at once.
   if (!connection_->isConnected() && !connection_->isReconnecting()) throw NotConnectedError();

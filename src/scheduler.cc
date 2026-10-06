@@ -1,6 +1,7 @@
 #include "scheduler.h"
 
 #include "protobus/logger.h"
+#include "threading.h"
 
 namespace protobus::detail {
 
@@ -55,6 +56,7 @@ size_t Scheduler::pending() const {
 }
 
 void Scheduler::run(std::shared_ptr<State> state) {
+  markNonBlockingThread("the protobus timer thread");
   std::unique_lock<std::mutex> lock(state->mutex);
   while (!state->stopping) {
     if (state->timers.empty()) {

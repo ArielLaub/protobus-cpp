@@ -3,6 +3,8 @@
 #include <google/protobuf/descriptor.h>
 #include <google/protobuf/message.h>
 
+#include <cstdlib>
+
 #include "protobus/config.h"
 #include "protobus/logger.h"
 
@@ -24,10 +26,29 @@ Context::Context(std::shared_ptr<amqp::Transport> transport)
 }
 
 Context::~Context() {
+  // close() drains when it actually closes; a Context closed earlier gets
+  // one drain here.
+  const bool drainedByClose = !closed_;
   try {
     close();
   } catch (...) {
   }
+  // Handlers still running reach this Context through their services: once
+  // it is gone they touch freed memory. That is a bug in the application's
+  // shutdown order, and the one thing worse than reporting it loudly is
+  // carrying on silently.
+  if (connection_->inFlightDeliveries() == 0) return;
+  if (!drainedByClose && connection_->drainInFlight(Config::shutdownDrainTimeoutMs())) return;
+  Logger::error("protobus: a Context is being destroyed while " +
+                std::to_string(connection_->inFlightDeliveries()) +
+                " handler(s) still run on it. They use it through their services and will touch freed memory. "
+                "Destroy the Context only after its handlers have finished: stop the services and drain "
+                "(Connection::drainInFlight), or let RunnableService shut down.");
+#ifndef NDEBUG
+  // Debug builds stop here, where the cause is visible, rather than at the
+  // memory corruption that follows.
+  std::abort();
+#endif
 }
 
 void Context::init(const std::string& amqpUrl, const std::vector<std::string>& protoLocations,

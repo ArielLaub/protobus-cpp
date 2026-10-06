@@ -10,6 +10,7 @@
 #include "protobus/logger.h"
 #include "protobus/priority.h"
 #include "scheduler.h"
+#include "threading.h"
 #include "uuid.h"
 
 namespace protobus {
@@ -203,6 +204,7 @@ void ChunkStream::cancel() {
 
 std::optional<std::string> ChunkStream::next() {
   if (!call_) return std::nullopt;
+  detail::requireMayBlock("a stream's next()");
   auto registry = call_->registry;
   std::unique_lock<std::mutex> lock(registry->mutex);
   for (;;) {
@@ -585,6 +587,8 @@ std::string MessageDispatcher::publish(const std::string& content, const std::st
                                        const CallOptions& options) {
   const auto priority = validatePriority(options.priority);
   const auto callerMessageId = validateMessageId(options.messageId);
+  detail::requireMayBlock("a protobus call or publish");
+  if (options.rpc) detail::requireNotOwnTurn(routingKey, "a call");
   awaitPublishable();
 
   const bool rpc = options.rpc;
@@ -660,6 +664,8 @@ std::string MessageDispatcher::publish(const std::string& content, const std::st
 
 ChunkStream MessageDispatcher::publishStreaming(const std::string& content, const std::string& routingKey,
                                                 const StreamOptions& options) {
+  detail::requireMayBlock("a streaming call");
+  detail::requireNotOwnTurn(routingKey, "a streaming call");
   if (!connection_->isConnected() && !connection_->isReconnecting()) throw NotConnectedError();
 
   auto call = std::make_shared<detail::StreamCall>();

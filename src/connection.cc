@@ -11,6 +11,7 @@
 #include "protobus/errors.h"
 #include "protobus/logger.h"
 #include "scheduler.h"
+#include "threading.h"
 #include "uuid.h"
 
 namespace protobus {
@@ -228,6 +229,7 @@ std::function<void()> Connection::registerRestorer(Restorer restore) {
 }
 
 void Connection::whenReady(std::optional<int64_t> timeoutMs) {
+  detail::requireMayBlock("Connection::whenReady");
   const int64_t limit = timeoutMs.value_or(Config::connectionReadyTimeoutMs());
   std::unique_lock<std::mutex> lock(mutex_);
   if (ready_) return;
@@ -284,6 +286,7 @@ void Connection::runRestorers(uint64_t generation) {
 // ---- connect and reconnect -----------------------------------------------------
 
 void Connection::connect(const std::string& url, ReconnectionOptions options) {
+  detail::requireMayBlock("Connection::connect");
   {
     std::lock_guard<std::mutex> lock(mutex_);
     if (connected_) throw AlreadyConnectedError();
@@ -858,6 +861,7 @@ void Connection::publishAsync(const std::shared_ptr<amqp::Channel>& channel, con
 
 std::string Connection::publish(const std::shared_ptr<amqp::Channel>& channel, const std::string& exchange,
                                 const std::string& routingKey, const std::string& content, PublishOptions options) {
+  detail::requireMayBlock("Connection::publish");
   if (!options.properties.messageId || options.properties.messageId->empty()) {
     options.properties.messageId = detail::randomUuid();
   }
@@ -888,6 +892,7 @@ size_t Connection::inFlightDeliveries() const {
 }
 
 bool Connection::drainInFlight(int64_t timeoutMs) {
+  detail::requireMayBlock("Connection::drainInFlight");
   std::unique_lock<std::mutex> lock(drainMutex_);
   return drainCv_.wait_for(lock, std::chrono::milliseconds(timeoutMs),
                            [&] { return inFlightDeliveries_ == 0 && runningHandlers_ == 0; });

@@ -39,6 +39,7 @@
 #include "amqp/url.h"
 #include "protobus/logger.h"
 #include "protobus/transport.h"
+#include "threading.h"
 
 #ifndef PROTOBUS_VERSION
 #define PROTOBUS_VERSION "dev"
@@ -636,6 +637,7 @@ class RabbitConnection : public Connection, public std::enable_shared_from_this<
 
   void loop() {
     ioThreadId_ = std::this_thread::get_id();
+    protobus::detail::markNonBlockingThread("a protobus transport (I/O) thread");
     const int sock = amqp_get_sockfd(conn_);
     while (!lost_) {
       std::deque<std::function<void()>> commands;

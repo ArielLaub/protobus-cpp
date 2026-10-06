@@ -4,6 +4,7 @@
 #include "protobus/logger.h"
 #include "protobus/message_factory.h"
 #include "protobus/message_listener.h"
+#include "threading.h"
 
 namespace protobus {
 
@@ -18,15 +19,23 @@ EventListener::EventListener(std::shared_ptr<Connection> connection, std::shared
   lateAck_ = true;
 }
 
+void EventListener::serializeWith(std::shared_ptr<detail::HandlerTurn> turn) {
+  std::lock_guard<std::mutex> lock(routerMutex_);
+  turn_ = std::move(turn);
+}
+
 MessageHandlerResult EventListener::dispatch(const std::string& body, MessageHandlerContext& context) {
   DecodedEvent event = factory_->decodeEvent(body);
   RawEvent raw{event.type, event.topic, &event.data, event.message.get()};
 
   EventHandler all;
+  std::shared_ptr<detail::HandlerTurn> turn;
   {
     std::lock_guard<std::mutex> lock(routerMutex_);
     all = allHandler_;
+    turn = turn_;
   }
+  detail::TurnScope serial(turn.get());
   if (all) all(*event.message, event.type, event.topic);
 
   // Match on the routing key the broker delivered on rather than the topic

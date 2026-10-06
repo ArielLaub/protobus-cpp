@@ -94,6 +94,7 @@ running.
 | `processingTimeoutMs` | `MESSAGE_PROCESSING_TIMEOUT` | Cap on one attempt at a unary request |
 | `maxPriority` | none | Declare the request queue as a priority queue |
 | `eventRetry` | off | Retry for the service's event subscriptions (see [Events](events.md)) |
+| `serializeHandlers` | false | Run the service's handlers (requests, stream steps, events) one at a time, so its state needs no locking (see [Threading](threading.md)) |
 
 Queue arguments are fixed when a queue is first declared. Changing
 `retryDelayMs` for a service that has run before fails its start with
@@ -123,7 +124,8 @@ an implementation must be safe for concurrent use when `maxConcurrent` is
 above 1, and its event handlers run on the event listener's own consumer,
 concurrently with its rpcs. The worker pool grows as needed: a handler that
 calls another service and waits for its reply does not starve the reply's own
-delivery.
+delivery. `serializeHandlers` runs them one at a time instead; see
+[Threading and lifetimes](threading.md).
 
 ## The processing timeout
 
@@ -229,3 +231,7 @@ class Player : public protobus::ProxiedService<Combat::PlayerProxy, Combat::Play
   void poke() { proxy().getStatus({}); }
 };
 ```
+
+With `serializeHandlers` on, a handler must not wait on its own service: the
+call could only run once the handler returns. It throws `std::logic_error`
+instead of deadlocking; call the method directly.

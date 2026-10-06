@@ -15,6 +15,7 @@
 | [Code generation](codegen.md) | The CLI, the protoc plugin, `protobus_generate()`, custom types |
 | [Testing](testing.md) | The in-memory broker and the suites |
 | [Compatibility](compatibility.md) | The wire contract and how the ports differ |
+| [Threading and lifetimes](threading.md) | Which thread runs what, what may block, serialized handlers, lifetimes |
 | [Architecture](architecture.md) | Threads, ownership and reconnection |
 | [Security](security.md) | Dispatch checks, error exposure, logging |
 

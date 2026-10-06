@@ -6,8 +6,11 @@
 //   ctx.init("amqp://guest:guest@localhost:5672/", {"./proto"});
 //
 // A Context is not copyable, and outlives every service and proxy built on
-// it. Destroying it closes the connection, then waits (up to
-// SHUTDOWN_DRAIN_TIMEOUT_MS) for handlers still running.
+// it, and every handler still running on it. Destroying it closes the
+// connection, then waits (up to SHUTDOWN_DRAIN_TIMEOUT_MS) for handlers still
+// running. If some still run after that, it logs an error naming the mistake,
+// and a debug build (NDEBUG unset) aborts there rather than let them touch
+// freed memory.
 #pragma once
 
 #include <memory>
