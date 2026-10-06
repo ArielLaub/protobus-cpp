@@ -10,7 +10,7 @@ Define a service in a `.proto` file, implement the class protobus generates for
 it, and call it from anywhere on the bus as if it were local. ProtoBus turns
 each service into **one durable RabbitMQ queue with N processes competing for
 it**, so load balancing, failover, backpressure, retries and dead-lettering are
-the broker's job, not your program's.
+handled by the broker.
 
 This is the C++ port of [protobus](https://github.com/ArielLaub/protobus)
 (TypeScript), [protobus-py](https://github.com/ArielLaub/protobus-py) (Python)
@@ -389,7 +389,7 @@ void read(Chat::AssistantProxy& assistant) {
 ## Concurrency
 
 Each unacknowledged delivery runs on a worker thread of the connection's own,
-so handlers run truly in parallel and must be safe for concurrent use. The
+so handlers run in parallel and must be safe for concurrent use. The
 number in flight is bounded by the consumer's prefetch: `maxConcurrent` for a
 service (default 1, one request at a time), `DEFAULT_PREFETCH` for event
 handling (also 1). A streaming handler holds its slot for the life of its

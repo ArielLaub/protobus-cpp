@@ -8,7 +8,7 @@ clients in all four languages can share one broker, one schema and even one
 queue: replicas of a service in different languages compete for its requests
 and climb one retry ladder together.
 
-This is tested, not assumed: the [cross-language suite](../crosslang/README.md)
+This is tested: the [cross-language suite](../crosslang/README.md)
 runs C++ against the other ports' real libraries over a real broker, in both
 directions, and runs `interop.Flaky` in all four languages at once on one
 queue.
