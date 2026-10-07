@@ -15,8 +15,9 @@ handled by the broker.
 This is the C++ port of [protobus](https://github.com/ArielLaub/protobus)
 (TypeScript), [protobus-py](https://github.com/ArielLaub/protobus-py) (Python)
 and [protobus-go](https://github.com/ArielLaub/protobus-go) (Go), designed
-after the TypeScript reference class for class. The four are
-**wire-compatible**: a C++ service serves TypeScript, Python and Go callers and
+after the TypeScript reference class for class, and is wire-compatible with
+all of them and with [protobus-java](https://github.com/ArielLaub/protobus-java) (Java): a C++ service serves
+TypeScript, Python, Go and Java callers and
 the other way round, with streaming, events, custom types and error codes
 included. See [Compatibility](docs/compatibility.md) and
 [Other languages](docs/README.md#other-languages).
@@ -412,7 +413,8 @@ envelopes (byte for byte), headers and error codes, and the same environment
 variables for configuration. Replicas of one service in different languages
 can share its queue and climb one retry ladder together. The
 [cross-language suite](crosslang/README.md) runs C++ against the other ports'
-real libraries over a real broker, in both directions.
+real libraries over a real broker, in both directions; the Java port's suite
+runs Java against this one.
 
 The type mapping, the topology and the few deliberate behavioural differences
 are in **[Compatibility](docs/compatibility.md)**.
