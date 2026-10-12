@@ -34,7 +34,9 @@ needs only protobuf and an AMQP client.
 | Go | [protobus-go](https://github.com/ArielLaub/protobus-go) | stable |
 | C++ | [protobus-cpp](https://github.com/ArielLaub/protobus-cpp) (this repository) | new |
 | Java | [protobus-java](https://github.com/ArielLaub/protobus-java) | new |
+| C# | [protobus-csharp](https://github.com/ArielLaub/protobus-csharp) | new |
+| Rust | [protobus-rs](https://github.com/ArielLaub/protobus-rs) | new |
 
 This port's CI runs it against the TypeScript, Python and Go ports' real
-libraries, in both directions, and protobus-java's CI runs Java against this
-port; the differences that remain are listed in [Compatibility](compatibility.md).
+libraries, in both directions, and each port since runs its own suite against
+this one; the differences that remain are listed in [Compatibility](compatibility.md).
